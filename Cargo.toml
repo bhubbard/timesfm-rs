@@ -1,0 +1,39 @@
+[package]
+name = "timesfm"
+version = "0.1.0"
+edition = "2021"
+authors = ["Brandon Hubbard"]
+description = "A native Rust implementation of Google Research's TimesFM (Time Series Foundation Model)"
+license = "Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/google-research/timesfm"
+keywords = ["timesfm", "time-series", "forecasting", "candle", "deep-learning"]
+categories = ["science", "mathematics"]
+
+[dependencies]
+candle-core = "0.11"
+candle-nn = "0.11"
+candle-transformers = "0.11"
+safetensors = "0.6"
+hf-hub = { version = "0.4", features = ["tokio"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+anyhow = "1.0"
+thiserror = "2.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio = { version = "1.40", features = ["full"] }
+
+[dev-dependencies]
+approx = "0.5"
+
+[features]
+default = []
+metal = ["candle-core/metal", "candle-nn/metal"]
+cuda = ["candle-core/cuda", "candle-nn/cuda"]
+accelerate = ["candle-core/accelerate"]
+
+[[bin]]
+name = "timesfm"
+path = "src/bin/timesfm.rs"

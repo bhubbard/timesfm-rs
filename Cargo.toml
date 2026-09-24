@@ -25,6 +25,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio = { version = "1.40", features = ["full"] }
 
+zev = { package = "zev-rs", version = "0.1", path = "../zev-rs", optional = true }
+apfel = { package = "apfel-rs", version = "0.1", path = "../apfel-rs", optional = true }
+
 [dev-dependencies]
 approx = "0.5"
 
@@ -33,6 +36,10 @@ default = []
 metal = ["candle-core/metal", "candle-nn/metal"]
 cuda = ["candle-core/cuda", "candle-nn/cuda"]
 accelerate = ["candle-core/accelerate"]
+mcp = []
+zev = ["dep:zev"]
+narrative = ["dep:apfel"]
+full = ["mcp", "zev", "narrative"]
 
 [[bin]]
 name = "timesfm"

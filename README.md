@@ -25,6 +25,13 @@ A native, high-performance Rust implementation of Google Research's **TimesFM** 
   - **Probabilistic Forecasting**: 9 quantiles (10% to 90% deciles) plus median point predictions.
 - **TimesFM 2.5 / 2.0 Support**:
   - Full support for TimesFM 2.5 200M/500M checkpoints.
+- **Model Context Protocol (MCP) Server**:
+  - Native JSON-RPC 2.0 stdio server (`timesfm mcp`) exposing foundation model tools (`forecast_univariate`, `forecast_multivariate`, `evaluate_trend`) to AI agent runtimes like Claude Desktop, Cursor, and Apple Intelligence agents.
+- **Fast Decision Engine & Guardrails (`zev-rs`)**:
+  - Optional `zev` feature integration providing sub-5-microsecond pre-flight series sanity checks (flatline, NaN ratio, degenerate variance with `__insufficient__` abstention).
+  - Quantitative post-forecast decision policy evaluation on TimesFM quantiles ($p_{10}, p_{50}, p_{90}$, and volatility spread) for autoscaling, alerting, and capacity planning.
+- **On-Device Narrative Synthesis (`apfel-rs`)**:
+  - Optional `narrative` feature integration providing natural-language executive summaries, drift commentary, and volatility risk alerts powered by Apple FoundationModels.
 - **Hugging Face Hub Integration**:
   - Load official pretrained checkpoints (`google/timesfm-3.0-pytorch`, `google/timesfm-2.5-200m-pytorch`) directly with automatic downloading and safetensors memory-mapping.
 - **Hardware Acceleration**:
@@ -168,6 +175,80 @@ cargo run --release --bin timesfm -- forecast \
 | `--positive` | Enforce non-negativity constraint | `false` |
 | `--symmetric` | Enable symmetric averaging | `false` |
 | `--znorm` | Apply z-normalization before inference | `false` |
+| `--guardrails` | Run pre-flight series sanity checks via `zev-rs` | `false` |
+| `--policy <PATH>` | Path to JSON policy schema to evaluate via `zev-rs` | `None` |
+| `--narrative` | Generate on-device natural language narrative via `apfel-rs` | `false` |
+
+---
+
+## Model Context Protocol (MCP) Server
+
+`timesfm-rs` includes a built-in MCP server operating over `stdio` conforming to protocol specification `2024-11-05`:
+
+```bash
+# Run MCP server connected to pretrained weights
+cargo run --release --bin timesfm -- mcp --model google/timesfm-3.0-pytorch
+
+# Run MCP server with lightweight mock forecaster (ideal for development & agent testing)
+cargo run --release --bin timesfm -- mcp --mock
+```
+
+### Exposed MCP Tools
+
+1. **`forecast_univariate`**:
+   - Parameters: `context` (array of numbers), `horizon` (integer), `return_quantiles` (boolean, default: `true`).
+   - Returns: Point predictions and quantile deciles ($p_{10}$ through $p_{90}$).
+2. **`forecast_multivariate`**:
+   - Parameters: `contexts` (array of series arrays), `horizon` (integer), `past_only_covariates` (optional), `past_future_covariates` (optional).
+   - Returns: Simultaneous multivariate forecasts across all series.
+3. **`evaluate_trend`**:
+   - Parameters: `series` (array of numbers).
+   - Returns: Microsecond trend direction, net drift, and variance analysis.
+
+---
+
+## Intelligent Decision Layer & Guardrails (`zev-rs`)
+
+Enable with `--features zev` or `--features full`:
+
+```rust
+use timesfm::{check_series_guardrails, ForecastPolicy, evaluate_policy_decision};
+
+// 1. Pre-flight sanity checks in ~3.5 microseconds (detects flatlines, NaNs, zero variance)
+let guard = check_series_guardrails(&context)?;
+if guard.should_abstain {
+    println!("Abstaining from inference: {}", guard.reason.unwrap());
+}
+
+// 2. Automated quantitative policy decision on forecast quantiles
+let policy = ForecastPolicy::autoscaling(
+    /* p90_threshold */ 100.0,
+    /* consecutive_steps */ 3,
+    /* volatility_threshold */ 25.0,
+);
+let decision = evaluate_policy_decision(&forecast_output, &policy)?;
+println!("Action: {} (Rationale: {})", decision.action, decision.rationale);
+```
+
+---
+
+## On-Device Narrative Synthesis (`apfel-rs`)
+
+Enable with `--features narrative` or `--features full` (macOS with Apple Silicon):
+
+```rust
+use timesfm::narrative::generate_forecast_narrative;
+
+// Generate structured executive narrative powered by Apple FoundationModels
+let narrative = generate_forecast_narrative(&forecast_output, None)?;
+
+println!("Summary:    {}", narrative.summary);
+println!("Trend:      {}", narrative.trend_description);
+println!("Volatility: {}", narrative.volatility_analysis);
+for alert in narrative.risk_alerts {
+    println!("Alert: {}", alert);
+}
+```
 
 ---
 

@@ -27,4 +27,14 @@ pub enum TimesfmError {
 
     #[error("Model load error: {0}")]
     Load(String),
+
+    #[error("Policy error: {0}")]
+    Policy(String),
+
+    #[cfg(feature = "zev")]
+    #[error("Zev error: {0}")]
+    Zev(#[from] zev::ZevError),
+
+    #[error("Narrative error: {0}")]
+    Narrative(String),
 }

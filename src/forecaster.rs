@@ -279,4 +279,21 @@ impl TimesFMForecaster {
             quantiles: all_quantiles,
         })
     }
+
+    /// Evaluates a post-forecast decision policy via zev-rs using quantile forecasts.
+    #[cfg(feature = "zev")]
+    pub fn evaluate_policy(
+        &self,
+        forecast: &ForecastOutput,
+        schema: &str,
+    ) -> Result<zev::types::ZevAnswer> {
+        crate::decide::evaluate_forecast_policy(forecast, schema)
+    }
+
+    /// Pre-flight series sanity guardrails check before inference.
+    #[cfg(feature = "zev")]
+    pub fn check_guardrails(&self, series: &[f32]) -> Result<crate::decide::GuardrailResult> {
+        crate::decide::check_series_guardrails(series)
+    }
 }
+

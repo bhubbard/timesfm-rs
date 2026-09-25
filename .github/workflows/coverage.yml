@@ -1,0 +1,50 @@
+name: Code Coverage
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  coverage:
+    name: llvm-cov
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Generate Code Coverage (LCOV & HTML)
+        run: |
+          cargo llvm-cov --workspace --lcov --output-path lcov.info
+          cargo llvm-cov --workspace --html --output-dir target/llvm-cov/html
+
+      - name: Publish Coverage Summary to GitHub Step Summary
+        run: |
+          echo "### Code Coverage Report 📊" >> $GITHUB_STEP_SUMMARY
+          echo '```text' >> $GITHUB_STEP_SUMMARY
+          cargo llvm-cov report >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload HTML Coverage Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: code-coverage-report-html
+          path: target/llvm-cov/html
+
+      - name: Upload LCOV Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: code-coverage-report-lcov
+          path: lcov.info

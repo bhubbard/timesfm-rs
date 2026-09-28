@@ -6,3 +6,5 @@ Cargo.lock
 *.csv
 *.safetensors
 *.bin
+coverage_report
+target/coverage

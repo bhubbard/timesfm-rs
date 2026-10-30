@@ -1,7 +1,7 @@
 use candle_core::{Result as CResult, Tensor};
 use candle_nn::VarBuilder;
 
-pub const RECIPROCAL_OF_SOFTPLUS_0: f64 = 1.4426950408889634; // 1.0 / ln(2.0)
+pub const RECIPROCAL_OF_SOFTPLUS_0: f64 = std::f64::consts::LOG2_E; // 1.0 / ln(2.0)
 
 /// RMSNorm layer matching PyTorch nn.RMSNorm.
 #[derive(Debug, Clone)]

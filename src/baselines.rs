@@ -11,6 +11,7 @@ use crate::metrics::{backtest_univariate, detect_seasonality, BacktestConfig};
 use crate::util::linear_interpolation;
 
 /// Standard normal quantile (probit) approximation using Beasley-Springer-Moro / Acklam rational approximation.
+#[allow(clippy::excessive_precision)]
 pub fn normal_quantile(p: f64) -> f32 {
     let p_clamped = p.clamp(1e-6, 1.0 - 1e-6);
     if (p_clamped - 0.5).abs() < 1e-9 {
@@ -445,8 +446,8 @@ impl HoltLinearForecaster {
         let phi = self.phi as f64;
 
         let mut sse = 0.0f64;
-        for t in 1..n {
-            let y = clean[t] as f64;
+        for &val in clean.iter().skip(1) {
+            let y = val as f64;
             let y_hat = level + phi * trend;
             let err = y - y_hat;
             sse += err * err;
@@ -645,9 +646,9 @@ impl Forecaster for EnsembleForecaster {
                 return_quantiles,
             )?;
 
-            for v in 0..num_variates.min(out.forecast.len()) {
-                for h in 0..horizon.min(out.forecast[v].len()) {
-                    combined_forecast[v][h] += w * out.forecast[v][h];
+            for (v_comb, v_out) in combined_forecast.iter_mut().zip(out.forecast.iter()) {
+                for (h_comb, &h_val) in v_comb.iter_mut().zip(v_out.iter()) {
+                    *h_comb += w * h_val;
                 }
             }
 

@@ -234,7 +234,7 @@ impl TimesFM2p5Model {
         let sigma_flat = sigma_bv.reshape((bv, 1))?;
 
         // Autoregressive multi-step decoding loop
-        let num_steps = (horizon + h_len - 1) / h_len;
+        let num_steps = horizon.div_ceil(h_len);
         let mut step_preds = Vec::with_capacity(num_steps);
 
         for step in 0..num_steps {

@@ -270,8 +270,7 @@ impl TimesFMForecaster {
             None
         };
 
-        for v in 0..num_variates {
-            let (mean, std) = z_stats[v];
+        for (v, &(mean, std)) in z_stats.iter().enumerate().take(num_variates) {
             let mut v_forecast = Vec::with_capacity(horizon);
             let mut v_quantiles = if options.return_quantiles {
                 Some(Vec::with_capacity(horizon))
@@ -494,8 +493,7 @@ impl TimesFM2p5Forecaster {
             None
         };
 
-        for v in 0..num_variates {
-            let (mean, std) = z_stats[v];
+        for (v, &(mean, std)) in z_stats.iter().enumerate().take(num_variates) {
             let mut v_forecast = Vec::with_capacity(horizon);
             let mut v_quantiles = if options.return_quantiles {
                 Some(Vec::with_capacity(horizon))

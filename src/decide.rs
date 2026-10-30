@@ -568,9 +568,11 @@ pub fn extract_quantiles(forecast: &ForecastOutput, variate_idx: usize) -> Extra
 /// Resolves a schema string into a `ForecastPolicy`.
 pub fn resolve_policy(schema: &str) -> Result<ForecastPolicy> {
     let s = schema.trim();
-    if s.is_empty() || s.eq_ignore_ascii_case("scaling") || s.eq_ignore_ascii_case("autoscaling") {
-        Ok(ForecastPolicy::autoscaling(100.0, 2, 50.0))
-    } else if s.eq_ignore_ascii_case("capacity") {
+    if s.is_empty()
+        || s.eq_ignore_ascii_case("scaling")
+        || s.eq_ignore_ascii_case("autoscaling")
+        || s.eq_ignore_ascii_case("capacity")
+    {
         Ok(ForecastPolicy::autoscaling(100.0, 2, 50.0))
     } else if s.eq_ignore_ascii_case("alert") || s.eq_ignore_ascii_case("alerting") {
         Ok(ForecastPolicy::alerting(100.0, 50.0))

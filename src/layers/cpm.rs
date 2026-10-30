@@ -17,6 +17,7 @@ use crate::util::{revin, update_running_stats};
 ///
 /// Returns:
 ///   (refined_mu, refined_sigma), each of shape (b, v, n_patches)
+#[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
 pub fn cpm_iterative_revin_refine(
     raw_logits: &Tensor,
     revin_n: &Tensor,

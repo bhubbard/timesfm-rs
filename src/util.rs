@@ -359,8 +359,8 @@ pub fn linear_interpolation(data: &[f32]) -> Vec<f32> {
     };
 
     // Pad leading NaNs with first valid value
-    for i in 0..first_idx {
-        result[i] = first_val;
+    for item in result.iter_mut().take(first_idx) {
+        *item = first_val;
     }
 
     let mut last_idx = first_idx;
@@ -370,8 +370,8 @@ pub fn linear_interpolation(data: &[f32]) -> Vec<f32> {
         if result[i].is_finite() {
             let cur_val = result[i];
             let step = (cur_val - last_val) / ((i - last_idx) as f32);
-            for k in (last_idx + 1)..i {
-                result[k] = last_val + step * ((k - last_idx) as f32);
+            for (k, item) in result.iter_mut().enumerate().take(i).skip(last_idx + 1) {
+                *item = last_val + step * ((k - last_idx) as f32);
             }
             last_idx = i;
             last_val = cur_val;
@@ -379,8 +379,8 @@ pub fn linear_interpolation(data: &[f32]) -> Vec<f32> {
     }
 
     // Pad trailing NaNs with last valid value
-    for i in (last_idx + 1)..n {
-        result[i] = last_val;
+    for item in result.iter_mut().take(n).skip(last_idx + 1) {
+        *item = last_val;
     }
 
     result

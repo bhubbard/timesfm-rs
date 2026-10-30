@@ -209,6 +209,7 @@ impl TimesFM3Model {
         clipped.reshape((b, v, n_patches, self.config.output_patch_len, num_quantiles))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn decode(
         &self,
         target: &Tensor,

@@ -6,7 +6,8 @@ use crate::layers::cpm::cpm_iterative_revin_refine;
 use crate::layers::dense::ResidualBlock;
 use crate::layers::transformer::StackedMixingTransformer;
 use crate::util::{
-    apply_linear_detrending, get_output_patch_via_roll, get_running_stats, revin, stitch_patches,
+    apply_input_transform, apply_linear_detrending, get_output_patch_via_roll, get_running_stats,
+    invert_input_transform, revin, stitch_patches,
 };
 
 #[derive(Debug, Clone)]
@@ -333,6 +334,13 @@ impl TimesFM3Model {
         let mut ctx_vals = Tensor::cat(&all_ctx_vals.iter().collect::<Vec<_>>(), 1)?;
         let ctx_masks = Tensor::cat(&all_ctx_masks.iter().collect::<Vec<_>>(), 1)?;
 
+        // Optional variance-stabilizing nonlinear input transform (e.g. arcsinh, signed_log1p)
+        if !self.config.input_transform.eq_ignore_ascii_case("identity")
+            && !self.config.input_transform.is_empty()
+        {
+            ctx_vals = apply_input_transform(&ctx_vals, &self.config.input_transform)?;
+        }
+
         // Linear detrending
         let (m_trend, c_trend, apply_detrend) = if self.config.use_linear_detrending {
             let (detrended, m_t, c_t, cond) = apply_linear_detrending(
@@ -358,15 +366,30 @@ impl TimesFM3Model {
         // Build horizon inputs
         let mut all_hor_vals = vec![
             Tensor::zeros((batch_size, num_target, padded_horizon), DType::F32, device)?,
-            Tensor::zeros((batch_size, num_past_only, padded_horizon), DType::F32, device)?,
         ];
         let mut all_hor_masks = vec![
             Tensor::ones((batch_size, num_target, padded_horizon), DType::F32, device)?,
-            Tensor::ones((batch_size, num_past_only, padded_horizon), DType::F32, device)?,
         ];
+        if num_past_only > 0 {
+            all_hor_vals.push(Tensor::zeros(
+                (batch_size, num_past_only, padded_horizon),
+                DType::F32,
+                device,
+            )?);
+            all_hor_masks.push(Tensor::ones(
+                (batch_size, num_past_only, padded_horizon),
+                DType::F32,
+                device,
+            )?);
+        }
 
         if let Some(pf) = &pf_padded {
             let mut pf_future = pf.narrow(2, context, horizon)?;
+            if !self.config.input_transform.eq_ignore_ascii_case("identity")
+                && !self.config.input_transform.is_empty()
+            {
+                pf_future = apply_input_transform(&pf_future, &self.config.input_transform)?;
+            }
             let mut pf_future_m = match &pf_mask_padded {
                 Some(m) => m.narrow(2, context, horizon)?,
                 None => Tensor::zeros_like(&pf_future)?,
@@ -493,6 +516,13 @@ impl TimesFM3Model {
         }
 
         // Return forecast for target variates: (b, num_target, horizon, num_quantiles)
-        horizon_logits.narrow(1, 0, num_target)
+        let target_logits = horizon_logits.narrow(1, 0, num_target)?;
+        if !self.config.input_transform.eq_ignore_ascii_case("identity")
+            && !self.config.input_transform.is_empty()
+        {
+            invert_input_transform(&target_logits, &self.config.input_transform)
+        } else {
+            Ok(target_logits)
+        }
     }
 }

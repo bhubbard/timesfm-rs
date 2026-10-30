@@ -160,31 +160,42 @@ impl MultiHeadAttention {
         }
 
         // Build attention mask: (1, 1, n, n) or (b, 1, n, n)
-        // If causal: q_idx >= kv_idx
-        let mut mask_vec = vec![0.0f32; n_patches * n_patches];
-        for qi in 0..n_patches {
-            for kj in 0..n_patches {
-                if self.causal_attention && qi < kj {
-                    mask_vec[qi * n_patches + kj] = -1e9;
+        // Only allocate causal matrix when causal_attention is enabled
+        let causal_mask = if self.causal_attention {
+            let mut mask_vec = vec![0.0f32; n_patches * n_patches];
+            for qi in 0..n_patches {
+                let row_offset = qi * n_patches;
+                for kj in (qi + 1)..n_patches {
+                    mask_vec[row_offset + kj] = -1e9;
                 }
             }
-        }
-        let base_mask = Tensor::from_vec(mask_vec, (1, 1, n_patches, n_patches), device)?;
-        let mut total_mask = base_mask;
+            Some(Tensor::from_vec(mask_vec, (1, 1, n_patches, n_patches), device)?)
+        } else {
+            None
+        };
 
-        // Apply patch_mask (True / 1.0 = masked out) to key positions
-        if let Some(pm) = patch_mask {
-            // pm is (b, n) where 1.0 = masked
+        // Apply patch_mask (True / 1.0 = masked out) to key positions on compact (b, 1, 1, n) shape
+        let key_mask = if let Some(pm) = patch_mask {
             let pm_exp = pm.unsqueeze(1)?.unsqueeze(2)?; // (b, 1, 1, n)
-            let pm_bcast = pm_exp.broadcast_as((batch_size, 1, n_patches, n_patches))?;
-            let mask_val = Tensor::full(-1e9f32, pm_bcast.shape(), device)?;
+            let mask_val = Tensor::full(-1e9f32, pm_exp.shape(), device)?;
             let zeros = Tensor::zeros_like(&mask_val)?;
-            let pm_is_masked = pm_bcast.gt(0.5)?;
-            let add_mask = pm_is_masked.where_cond(&mask_val, &zeros)?;
-            total_mask = total_mask.broadcast_as(add_mask.shape())?.add(&add_mask)?;
-        }
+            let pm_is_masked = pm_exp.gt(0.5)?;
+            Some(pm_is_masked.where_cond(&mask_val, &zeros)?)
+        } else {
+            None
+        };
 
-        let logits_masked = logits.add(&total_mask.broadcast_as(logits.shape())?)?;
+        let logits_masked = match (causal_mask, key_mask) {
+            (Some(cm), Some(km)) => {
+                let combined = cm
+                    .broadcast_as((batch_size, 1, n_patches, n_patches))?
+                    .broadcast_add(&km)?;
+                logits.broadcast_add(&combined)?
+            }
+            (Some(cm), None) => logits.broadcast_add(&cm)?,
+            (None, Some(km)) => logits.broadcast_add(&km)?,
+            (None, None) => logits,
+        };
         let weights = candle_nn::ops::softmax(&logits_masked, candle_core::D::Minus1)?;
 
         // weights @ v -> (b, num_heads, n, head_dim)

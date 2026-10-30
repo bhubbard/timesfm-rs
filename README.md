@@ -133,10 +133,10 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let output = forecaster.predict_multivariate(
-        &[&series1, &[2.0; context_len]],
+        &[&series1, &series2],
         horizon,
         Some(&[&past_cov]),
-        Some(&future_cov),
+        Some(&[&future_cov]),
         &options,
     )?;
 
@@ -145,6 +145,34 @@ async fn main() -> anyhow::Result<()> {
 
     Ok(())
 }
+```
+
+### 3. Statistical Metrics, Conformal Calibration & Backtesting
+
+```rust
+use timesfm::{
+    apply_conformal_calibration, backtest_univariate, calibrate_conformal_quantiles,
+    crps_from_quantiles, detect_quantile_anomalies, mae, rmse, BacktestConfig,
+};
+
+// Point & probabilistic accuracy metrics
+let mae_val = mae(&actual, &forecast_output.forecast[0])?;
+let rmse_val = rmse(&actual, &forecast_output.forecast[0])?;
+let crps_val = crps_from_quantiles(
+    &actual,
+    &forecast_output.quantiles.as_ref().unwrap()[0],
+    &forecaster.model.config.quantiles,
+)?;
+
+// Conformalized Quantile Regression (CQR) for finite-sample coverage guarantees
+let calibration = calibrate_conformal_quantiles(&cal_actual, &cal_p10, &cal_p90, 0.80)?;
+let calibrated_output = apply_conformal_calibration(&forecast_output, &calibration);
+
+// Zero-shot quantile anomaly detection
+let anomalies = detect_quantile_anomalies(&actual, &calibrated_output, 0, 2.5)?;
+
+// Rolling-origin walk-forward backtesting
+let bt_report = backtest_univariate(&forecaster, &historical_series, &BacktestConfig::default())?;
 ```
 
 ---
@@ -261,11 +289,12 @@ cargo test
 ```
 
 The test suite covers:
-- **Primitives**: RoPE rotary positional embedding, PerDimScale, RevIN round-trip, running stats.
-- **Transformations & Stitching**: Patch rolling, overlap stitching, linear detrending.
+- **Primitives**: RoPE rotary positional embedding (1D/2D positions), PerDimScale, RevIN round-trip, running stats, nonlinear variance-stabilizing transforms (`arcsinh`, `signed_log1p`).
+- **Transformations & Stitching**: Patch rolling, overlap stitching, centered OLS linear detrending (including high-offset numerical stability).
 - **CPM RevIN**: Iterative running statistic updates on CPM-masked patches.
-- **Model Forward & Decode**: Compact multi-layer MixingTransformer end-to-end forward pass and univariate/multivariate decoding.
-- **Forecaster API**: Univariate, multivariate, dynamic covariates, symmetric averaging, non-negativity clamping, and z-normalization.
+- **Model Forward & Decode**: Compact multi-layer MixingTransformer (TimesFM 3.0) and TimesFM 2.5 end-to-end forward pass and univariate/multivariate decoding.
+- **Forecaster API**: Univariate, multivariate, dynamic covariates, quantile-aligned symmetric averaging, non-negativity clamping, and z-normalization.
+- **Statistical Metrics & Calibration**: MAE, MSE, RMSE, MAPE, sMAPE, WAPE, MASE, Pinball Loss, CRPS, Conformalized Quantile Regression (CQR), zero-shot quantile anomaly detection, and walk-forward backtesting.
 
 ---
 

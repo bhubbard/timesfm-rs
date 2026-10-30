@@ -1,7 +1,7 @@
 use candle_core::{DType, Device, IndexOp, Tensor};
 use timesfm::layers::norm::PerDimScale;
 use timesfm::layers::rope::RotaryPositionalEmbedding;
-use timesfm::util::{get_running_stats, revin};
+use timesfm::util::{apply_input_transform, get_running_stats, invert_input_transform, revin};
 
 #[test]
 fn test_rope_rotation() -> candle_core::Result<()> {
@@ -72,6 +72,39 @@ fn test_running_stats() -> candle_core::Result<()> {
     // Patch 1 cumulative mean of 1..=8 is 4.5
     let mu1 = mu.i((0, 0, 1))?.to_scalar::<f32>()?;
     assert!((mu1 - 4.5).abs() < 1e-4, "Expected 4.5, got {}", mu1);
+
+    Ok(())
+}
+
+#[test]
+fn test_nonlinear_input_transforms_roundtrip() -> candle_core::Result<()> {
+    let device = Device::Cpu;
+    let x = Tensor::new(&[-50.0f32, -2.5, 0.0, 1.25, 100.0], &device)?;
+
+    for transform in &["identity", "arcsinh", "signed_log1p"] {
+        let z = apply_input_transform(&x, transform)?;
+        let x_rec = invert_input_transform(&z, transform)?;
+        let max_diff = x_rec.sub(&x)?.abs()?.max_all()?.to_scalar::<f32>()?;
+        assert!(
+            max_diff < 1e-3,
+            "Transform '{}' roundtrip error too high: {}",
+            transform,
+            max_diff
+        );
+    }
+
+    // 1D custom position tensor in RoPE
+    let rope = RotaryPositionalEmbedding::new(8, 1.0, 10000.0, &device)?;
+    let inp = Tensor::ones((1, 4, 2, 8), DType::F32, &device)?;
+    let pos_1d = Tensor::new(&[0.0f32, 1.0, 2.0, 3.0], &device)?;
+    let rot_1d = rope.forward(&inp, Some(&pos_1d))?;
+    let rot_default = rope.forward(&inp, None)?;
+    let diff = rot_1d
+        .sub(&rot_default)?
+        .abs()?
+        .max_all()?
+        .to_scalar::<f32>()?;
+    assert!(diff < 1e-6);
 
     Ok(())
 }

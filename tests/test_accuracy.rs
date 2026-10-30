@@ -101,3 +101,50 @@ fn test_quantile_calibration_monotonicity() {
         );
     }
 }
+
+#[test]
+fn test_linear_detrending_high_offset_numerical_stability() -> candle_core::Result<()> {
+    // Verify that centered OLS detrending remains accurate even with a large 1e6 baseline offset
+    let device = Device::Cpu;
+    let n = 64;
+    let a_true = 2.5f32;
+    let b_true = 1_000_000.0f32;
+
+    let series: Vec<f32> = (0..n).map(|i| b_true + a_true * (i as f32)).collect();
+    let ctx_vals = Tensor::from_vec(series, (1, 1, n), &device)?;
+    let ctx_masks = Tensor::zeros((1, 1, n), DType::F32, &device)?;
+
+    let (detrended, slope, intercept, cond) = apply_linear_detrending(&ctx_vals, &ctx_masks, 0.5)?;
+    let is_detrended = cond.flatten_all()?.to_vec1::<u8>()?[0] > 0;
+    assert!(
+        is_detrended,
+        "High-offset linear series must trigger detrending without catastrophic cancellation"
+    );
+
+    let est_slope = slope.flatten_all()?.to_vec1::<f32>()?[0];
+    let expected_slope = a_true * (n as f32);
+    assert!(
+        (est_slope - expected_slope).abs() < 0.5,
+        "High-offset slope {} diverged from expected {}",
+        est_slope,
+        expected_slope
+    );
+
+    let est_intercept = intercept.flatten_all()?.to_vec1::<f32>()?[0];
+    let expected_intercept = b_true + a_true * ((n - 1) as f32);
+    assert!(
+        (est_intercept - expected_intercept).abs() < 1.0,
+        "High-offset intercept {} diverged from expected {}",
+        est_intercept,
+        expected_intercept
+    );
+
+    let residual_std = detrended.sqr()?.mean_all()?.sqrt()?.to_scalar::<f32>()?;
+    assert!(
+        residual_std < 0.5,
+        "Residual std after detrending high-offset line should be near 0, got {}",
+        residual_std
+    );
+
+    Ok(())
+}

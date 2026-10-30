@@ -105,8 +105,8 @@ pub fn check_series_guardrails_with_config(
     let mut nan_count = 0usize;
     let mut min_val = f32::INFINITY;
     let mut max_val = f32::NEG_INFINITY;
-    let mut sum = 0.0f64;
-    let mut sum_sq = 0.0f64;
+    let mut mean_acc = 0.0f64;
+    let mut m2_acc = 0.0f64;
 
     for &val in series {
         if val.is_finite() {
@@ -118,8 +118,10 @@ pub fn check_series_guardrails_with_config(
                 max_val = val;
             }
             let v = val as f64;
-            sum += v;
-            sum_sq += v * v;
+            let delta = v - mean_acc;
+            mean_acc += delta / (valid_points as f64);
+            let delta2 = v - mean_acc;
+            m2_acc += delta * delta2;
         } else {
             nan_count += 1;
         }
@@ -143,14 +145,15 @@ pub fn check_series_guardrails_with_config(
             variance: 0.0,
             min_val: if min_val.is_finite() { min_val } else { 0.0 },
             max_val: if max_val.is_finite() { max_val } else { 0.0 },
-            mean_val: if valid_points > 0 { (sum / valid_points as f64) as f32 } else { 0.0 },
+            mean_val: if valid_points > 0 { mean_acc as f32 } else { 0.0 },
             is_flatline: true,
         });
     }
 
+    let mean = mean_acc;
+    let variance = (m2_acc / (valid_points as f64)).max(0.0) as f32;
+
     if nan_ratio > config.max_nan_ratio {
-        let mean = sum / valid_points as f64;
-        let variance = ((sum_sq / valid_points as f64) - (mean * mean)).max(0.0) as f32;
         return Ok(GuardrailResult {
             passed: false,
             should_abstain: true,
@@ -172,8 +175,6 @@ pub fn check_series_guardrails_with_config(
         });
     }
 
-    let mean = sum / valid_points as f64;
-    let variance = ((sum_sq / valid_points as f64) - (mean * mean)).max(0.0) as f32;
     let range = max_val - min_val;
     let is_flatline = variance <= config.min_variance || range <= 1e-7;
 
@@ -560,6 +561,7 @@ pub fn evaluate_forecast_policy(forecast: &ForecastOutput, schema: &str) -> Resu
                 model: None,
                 temperature: Some(1.0),
                 enable_temporal_facts: false,
+                images: None,
             };
 
             let engine = zev::ZevEngine::default();
@@ -675,6 +677,7 @@ pub fn evaluate_forecast_policy(forecast: &ForecastOutput, schema: &str) -> Resu
         model: None,
         temperature: Some(1.0),
         enable_temporal_facts: false,
+        images: None,
     };
 
     let engine = zev::ZevEngine::default();
@@ -691,6 +694,22 @@ pub fn evaluate_policy_decision(
     forecast: &ForecastOutput,
     policy: &ForecastPolicy,
 ) -> Result<PolicyDecision> {
+    let extracted = extract_quantiles(forecast, 0);
+    let triggered_rule = policy
+        .rules
+        .iter()
+        .find(|rule| {
+            let series = match rule.rule.metric {
+                ForecastMetric::P10 => &extracted.p10,
+                ForecastMetric::P50 => &extracted.p50,
+                ForecastMetric::P90 => &extracted.p90,
+                ForecastMetric::Volatility => &extracted.volatility,
+                ForecastMetric::Mean => &extracted.p50,
+            };
+            rule.rule.evaluate(series)
+        })
+        .map(|r| r.name.clone());
+
     let schema_json = serde_json::to_string(policy)?;
     let zev_answer = evaluate_forecast_policy(forecast, &schema_json)?;
     let action = match &zev_answer.decision {
@@ -700,7 +719,7 @@ pub fn evaluate_policy_decision(
     };
     Ok(PolicyDecision {
         action: action.clone(),
-        triggered_rule: None,
+        triggered_rule,
         confidence: zev_answer.confidence,
         rationale: format!(
             "Zev decision selected '{}' with confidence {:.2} (status: {})",

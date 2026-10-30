@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -27,8 +27,8 @@ jobs:
 
       - name: Generate Code Coverage (LCOV & HTML)
         run: |
-          cargo llvm-cov --workspace --lcov --output-path lcov.info
-          cargo llvm-cov --workspace --html --output-dir target/llvm-cov/html
+          cargo llvm-cov --workspace --features full --lcov --output-path lcov.info
+          cargo llvm-cov --workspace --features full --html --output-dir target/llvm-cov/html
 
       - name: Publish Coverage Summary to GitHub Step Summary
         run: |
@@ -38,13 +38,13 @@ jobs:
           echo '```' >> $GITHUB_STEP_SUMMARY
 
       - name: Upload HTML Coverage Report
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
           name: code-coverage-report-html
           path: target/llvm-cov/html
 
       - name: Upload LCOV Report
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
           name: code-coverage-report-lcov
           path: lcov.info

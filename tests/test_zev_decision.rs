@@ -211,6 +211,10 @@ fn test_policy_autoscaling_volatility_alert() {
         .expect("Policy decision evaluation should succeed");
 
     assert_eq!(decision.action, "alert", "High volatility should trigger alert");
+    assert_eq!(
+        decision.triggered_rule.as_deref(),
+        Some("volatility_alert_rule")
+    );
     assert!(decision.confidence > 0.4);
 }
 

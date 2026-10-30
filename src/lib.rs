@@ -4,6 +4,7 @@ pub mod error;
 pub mod forecaster;
 pub mod layers;
 pub mod mcp;
+pub mod metrics;
 pub mod model;
 pub mod util;
 
@@ -12,8 +13,18 @@ pub use config::{
     TimesFM3Config, TransformerConfig,
 };
 pub use error::{Result, TimesfmError};
-pub use forecaster::{ForecastOptions, ForecastOutput, TimesFMForecaster};
+pub use forecaster::{
+    load_auto_forecaster, ForecastOptions, ForecastOutput, TimesFM2p5Forecaster, TimesFMForecaster,
+};
 pub use mcp::run_mcp_server;
+pub use metrics::{
+    apply_conformal_calibration, autocorrelation, backtest_univariate,
+    calibrate_conformal_quantiles, crps_from_quantiles, decompose_series,
+    detect_quantile_anomalies, detect_seasonality, evaluate_forecast_output, mae, mape, mase, mse,
+    pinball_loss, prediction_interval_coverage, rmse, smape, wape, AnomalyPoint, AnomalyReport,
+    BacktestConfig, BacktestResult, ConformalCalibration, ForecastAccuracyReport,
+    SeasonalDecomposition,
+};
 pub use model::{TimesFM2p5Model, TimesFM3Model};
 
 #[cfg(feature = "zev")]

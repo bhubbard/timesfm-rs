@@ -4,48 +4,75 @@ use std::path::Path;
 
 use crate::error::{Result, TimesfmError};
 
-/// Reads single-column or multi-column time series data from a CSV file.
-pub fn read_csv<P: AsRef<Path>>(path: P) -> Result<Vec<Vec<f32>>> {
+/// Parsed CSV time series dataset with optional column headers.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CsvDataset {
+    pub headers: Option<Vec<String>>,
+    pub columns: Vec<Vec<f32>>,
+}
+
+fn is_missing_token(token: &str) -> bool {
+    token.is_empty()
+        || token.eq_ignore_ascii_case("nan")
+        || token.eq_ignore_ascii_case("na")
+        || token.eq_ignore_ascii_case("null")
+        || token.eq_ignore_ascii_case("none")
+}
+
+/// Reads single-column or multi-column time series data and optional headers from a CSV file.
+pub fn read_csv_with_headers<P: AsRef<Path>>(path: P) -> Result<CsvDataset> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);
 
+    let mut headers: Option<Vec<String>> = None;
     let mut columns: Vec<Vec<f32>> = Vec::new();
     let mut is_first_line = true;
 
     for line in reader.lines() {
         let line = line?;
         let trimmed = line.trim();
-        if trimmed.is_empty() {
+        if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
 
         let tokens: Vec<&str> = trimmed.split(',').map(|s| s.trim()).collect();
 
-        // Check if header
+        // Check if header: a token indicates a header only if it is not a missing-value marker
+        // and cannot be parsed as a floating-point number.
         if is_first_line {
             is_first_line = false;
-            let looks_like_header = tokens.iter().any(|t| t.parse::<f32>().is_err());
+            let looks_like_header = tokens
+                .iter()
+                .any(|t| !is_missing_token(t) && t.parse::<f32>().is_err());
+            columns = vec![Vec::new(); tokens.len()];
             if looks_like_header {
-                columns = vec![Vec::new(); tokens.len()];
+                headers = Some(tokens.iter().map(|&s| s.to_string()).collect());
                 continue;
-            } else {
-                columns = vec![Vec::new(); tokens.len()];
             }
         }
 
         for (i, token) in tokens.iter().enumerate() {
             if i < columns.len() {
-                let val = token.parse::<f32>().unwrap_or(f32::NAN);
+                let val = if is_missing_token(token) {
+                    f32::NAN
+                } else {
+                    token.parse::<f32>().unwrap_or(f32::NAN)
+                };
                 columns[i].push(val);
             }
         }
     }
 
-    if columns.is_empty() {
+    if columns.is_empty() || columns[0].is_empty() {
         return Err(TimesfmError::Inference("CSV file was empty".to_string()));
     }
 
-    Ok(columns)
+    Ok(CsvDataset { headers, columns })
+}
+
+/// Reads single-column or multi-column time series data from a CSV file.
+pub fn read_csv<P: AsRef<Path>>(path: P) -> Result<Vec<Vec<f32>>> {
+    Ok(read_csv_with_headers(path)?.columns)
 }
 
 /// Writes forecast outputs to a CSV file.

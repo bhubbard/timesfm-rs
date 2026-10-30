@@ -272,46 +272,59 @@ pub fn apply_linear_detrending(
     let t_bcast = t_norm.broadcast_as(ctx_vals.shape())?;
     let t_valid = is_valid.where_cond(&t_bcast, &zeros)?;
     let sum_t = t_valid.sum(candle_core::D::Minus1)?.unsqueeze(candle_core::D::Minus1)?;
-
-    let t2_valid = is_valid.where_cond(&t_bcast.sqr()?, &zeros)?;
-    let sum_t2 = t2_valid.sum(candle_core::D::Minus1)?.unsqueeze(candle_core::D::Minus1)?;
+    let mean_t = sum_t.div(&safe_nv)?;
 
     let y_valid = is_valid.where_cond(ctx_vals, &zeros)?;
     let sum_y = y_valid.sum(candle_core::D::Minus1)?.unsqueeze(candle_core::D::Minus1)?;
+    let mean_y = sum_y.div(&safe_nv)?;
 
-    let ty = t_bcast.mul(ctx_vals)?;
-    let ty_valid = is_valid.where_cond(&ty, &zeros)?;
-    let sum_ty = ty_valid.sum(candle_core::D::Minus1)?.unsqueeze(candle_core::D::Minus1)?;
+    // Centered OLS for numerical stability on high-offset series
+    let t_centered = is_valid.where_cond(&t_bcast.broadcast_sub(&mean_t)?, &zeros)?;
+    let y_centered = is_valid.where_cond(&ctx_vals.broadcast_sub(&mean_y)?, &zeros)?;
 
-    // det = n_v * sum_t2 - sum_t^2
-    let det = n_v.mul(&sum_t2)?.sub(&sum_t.sqr()?)?;
-    let safe_det = make_safe_for_division(&det)?;
-    let det_is_zero = det.eq(0.0)?;
+    let cov_ty = t_centered
+        .mul(&y_centered)?
+        .sum(candle_core::D::Minus1)?
+        .unsqueeze(candle_core::D::Minus1)?;
+    let var_t = t_centered
+        .sqr()?
+        .sum(candle_core::D::Minus1)?
+        .unsqueeze(candle_core::D::Minus1)?;
 
-    let m_num = n_v.mul(&sum_ty)?.sub(&sum_t.mul(&sum_y)?)?;
-    let m_trend_raw = m_num.div(&safe_det)?;
+    let safe_var_t = make_safe_for_division(&var_t)?;
+    let var_t_is_zero = var_t.lt(TOLERANCE)?;
+
+    let m_trend_raw = cov_ty.div(&safe_var_t)?;
     let zero_m = Tensor::zeros((b, v, 1), DType::F32, device)?;
-    let m_trend = det_is_zero.where_cond(&zero_m, &m_trend_raw)?;
+    let m_trend = var_t_is_zero.where_cond(&zero_m, &m_trend_raw)?;
 
-    // c = (sum_y - m * sum_t) / n_v
-    let c_num = sum_y.sub(&m_trend.mul(&sum_t)?)?;
-    let c_trend = c_num.div(&safe_nv)?;
+    // c = mean_y - m * mean_t
+    let c_trend = mean_y.sub(&m_trend.mul(&mean_t)?)?;
 
     // Trend: m * t + c
     let trend = m_trend.broadcast_mul(&t_bcast)?.broadcast_add(&c_trend)?;
     let ctx_detrended = ctx_vals.sub(&trend)?;
 
-    // Variance comparison:
-    let mean_y = sum_y.div(&safe_nv)?;
-    let sum_y2 = is_valid.where_cond(&ctx_vals.sqr()?, &zeros)?.sum(candle_core::D::Minus1)?.unsqueeze(candle_core::D::Minus1)?;
-    let var_orig_raw = sum_y2.div(&safe_nv)?.sub(&mean_y.sqr()?)?;
+    // Centered variance comparison:
+    let var_orig_raw = y_centered
+        .sqr()?
+        .sum(candle_core::D::Minus1)?
+        .unsqueeze(candle_core::D::Minus1)?
+        .div(&safe_nv)?;
     let var_orig = var_orig_raw.maximum(&Tensor::zeros_like(&var_orig_raw)?)?;
     let std_orig = var_orig.sqrt()?;
 
-    let sum_yd = is_valid.where_cond(&ctx_detrended, &zeros)?.sum(candle_core::D::Minus1)?.unsqueeze(candle_core::D::Minus1)?;
+    let sum_yd = is_valid
+        .where_cond(&ctx_detrended, &zeros)?
+        .sum(candle_core::D::Minus1)?
+        .unsqueeze(candle_core::D::Minus1)?;
     let mean_yd = sum_yd.div(&safe_nv)?;
-    let sum_yd2 = is_valid.where_cond(&ctx_detrended.sqr()?, &zeros)?.sum(candle_core::D::Minus1)?.unsqueeze(candle_core::D::Minus1)?;
-    let var_det_raw = sum_yd2.div(&safe_nv)?.sub(&mean_yd.sqr()?)?;
+    let yd_centered = is_valid.where_cond(&ctx_detrended.broadcast_sub(&mean_yd)?, &zeros)?;
+    let var_det_raw = yd_centered
+        .sqr()?
+        .sum(candle_core::D::Minus1)?
+        .unsqueeze(candle_core::D::Minus1)?
+        .div(&safe_nv)?;
     let var_det = var_det_raw.maximum(&Tensor::zeros_like(&var_det_raw)?)?;
     let std_det = var_det.sqrt()?;
 
@@ -371,4 +384,57 @@ pub fn linear_interpolation(data: &[f32]) -> Vec<f32> {
     }
 
     result
+}
+
+/// Applies a configurable element-wise nonlinear variance-stabilizing input transform.
+///
+/// Supported transforms:
+/// - `"identity"` (default): $f(x) = x$
+/// - `"arcsinh"` / `"asinh"`: $f(x) = \text{sign}(x) \ln(|x| + \sqrt{x^2 + 1})$
+/// - `"signed_log1p"` / `"log1p"`: $f(x) = \text{sign}(x) \ln(1 + |x|)$
+pub fn apply_input_transform(x: &Tensor, transform: &str) -> CResult<Tensor> {
+    match transform.trim().to_ascii_lowercase().as_str() {
+        "" | "identity" | "none" => Ok(x.clone()),
+        "arcsinh" | "asinh" => {
+            let abs_x = x.abs()?;
+            let ones = Tensor::ones_like(x)?;
+            let rad = x.sqr()?.add(&ones)?.sqrt()?;
+            let mag = abs_x.add(&rad)?.log()?;
+            let neg_mag = mag.neg()?;
+            let is_neg = x.lt(0.0)?;
+            is_neg.where_cond(&neg_mag, &mag)
+        }
+        "signed_log1p" | "log1p" => {
+            let abs_x = x.abs()?;
+            let ones = Tensor::ones_like(x)?;
+            let mag = abs_x.add(&ones)?.log()?;
+            let neg_mag = mag.neg()?;
+            let is_neg = x.lt(0.0)?;
+            is_neg.where_cond(&neg_mag, &mag)
+        }
+        other => candle_core::bail!("Unsupported input_transform: '{}'", other),
+    }
+}
+
+/// Inverts a configurable element-wise nonlinear input transform on forecast outputs.
+pub fn invert_input_transform(y: &Tensor, transform: &str) -> CResult<Tensor> {
+    match transform.trim().to_ascii_lowercase().as_str() {
+        "" | "identity" | "none" => Ok(y.clone()),
+        "arcsinh" | "asinh" => {
+            // sinh(y) = (exp(y) - exp(-y)) / 2
+            let exp_pos = y.exp()?;
+            let exp_neg = y.neg()?.exp()?;
+            exp_pos.sub(&exp_neg)?.affine(0.5, 0.0)
+        }
+        "signed_log1p" | "log1p" => {
+            // sign(y) * (exp(|y|) - 1)
+            let abs_y = y.abs()?;
+            let ones = Tensor::ones_like(y)?;
+            let mag = abs_y.exp()?.sub(&ones)?;
+            let neg_mag = mag.neg()?;
+            let is_neg = y.lt(0.0)?;
+            is_neg.where_cond(&neg_mag, &mag)
+        }
+        other => candle_core::bail!("Unsupported input_transform: '{}'", other),
+    }
 }

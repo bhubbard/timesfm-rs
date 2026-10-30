@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 
 use crate::error::{Result, TimesfmError};
-use crate::forecaster::{ForecastOptions, ForecastOutput, TimesFMForecaster};
+use crate::forecaster::{ForecastOptions, ForecastOutput, TimesFM2p5Forecaster, TimesFMForecaster};
 
 /// Trait abstracting forecasting capabilities for MCP server tools.
 pub trait Forecaster: Send + Sync {
@@ -63,6 +63,40 @@ impl Forecaster for TimesFMForecaster {
             past_future_covariates,
             &options,
         )
+    }
+
+    fn quantile_levels(&self) -> Vec<f64> {
+        self.model.config.quantiles.clone()
+    }
+}
+
+impl Forecaster for TimesFM2p5Forecaster {
+    fn forecast_univariate(
+        &self,
+        context: &[f32],
+        horizon: usize,
+        return_quantiles: bool,
+    ) -> Result<ForecastOutput> {
+        let options = ForecastOptions {
+            return_quantiles,
+            ..Default::default()
+        };
+        self.predict_univariate(context, horizon, &options)
+    }
+
+    fn forecast_multivariate(
+        &self,
+        contexts: &[&[f32]],
+        horizon: usize,
+        _past_only_covariates: Option<&[&[f32]]>,
+        _past_future_covariates: Option<&[&[f32]]>,
+        return_quantiles: bool,
+    ) -> Result<ForecastOutput> {
+        let options = ForecastOptions {
+            return_quantiles,
+            ..Default::default()
+        };
+        self.predict_multivariate(contexts, horizon, &options)
     }
 
     fn quantile_levels(&self) -> Vec<f64> {

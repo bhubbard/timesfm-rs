@@ -40,7 +40,13 @@ impl RotaryPositionalEmbedding {
         }
         let device = inputs.device();
         let pos = match position {
-            Some(p) => p.clone(),
+            Some(p) => {
+                if p.dims().len() == 1 {
+                    p.unsqueeze(0)?
+                } else {
+                    p.clone()
+                }
+            }
             None => {
                 let seq_len = inputs.dims()[1];
                 let pos_vec: Vec<f32> = (0..seq_len).map(|i| i as f32).collect();

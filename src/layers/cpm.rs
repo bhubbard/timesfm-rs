@@ -49,6 +49,9 @@ pub fn cpm_iterative_revin_refine(
     let mut refined_mu_list = Vec::with_capacity(n_patches);
     let mut refined_sigma_list = Vec::with_capacity(n_patches);
 
+    // Pre-fetch patch_cpm_mask to host once to avoid b * n_patches device-to-host scalar syncs
+    let cpm_mask_host = patch_cpm_mask.to_vec2::<f32>()?;
+
     for i in 0..n_patches {
         let actual_n = revin_n.i((.., .., i))?;
         let actual_mu = revin_mu.i((.., .., i))?;
@@ -57,13 +60,18 @@ pub fn cpm_iterative_revin_refine(
         let is_cpm = patch_cpm_mask.i((.., i))?.unsqueeze(1)?; // (b, 1)
 
         // Select predicted_values_step of shape (b, v, patch_len)
-        let mut step_slices = Vec::with_capacity(b);
-        for batch_idx in 0..b {
-            let bo = block_offset[batch_idx];
-            let patch_slice = anchor_predicted_values.i((batch_idx, .., bo, ..))?; // (v, patch_len)
-            step_slices.push(patch_slice.unsqueeze(0)?);
-        }
-        let predicted_values_step = Tensor::cat(&step_slices.iter().collect::<Vec<_>>(), 0)?;
+        let predicted_values_step = if b == 1 {
+            let bo = block_offset[0];
+            anchor_predicted_values.i((.., .., bo, ..))?
+        } else {
+            let mut step_slices = Vec::with_capacity(b);
+            for batch_idx in 0..b {
+                let bo = block_offset[batch_idx];
+                let patch_slice = anchor_predicted_values.i((batch_idx, .., bo, ..))?; // (v, patch_len)
+                step_slices.push(patch_slice.unsqueeze(0)?);
+            }
+            Tensor::cat(&step_slices.iter().collect::<Vec<_>>(), 0)?
+        };
 
         let (new_n, new_mu, new_sigma) = update_running_stats(
             &carry_n,
@@ -85,27 +93,41 @@ pub fn cpm_iterative_revin_refine(
         let clamped = step_predicted_values.maximum(&neg_clip_val)?.minimum(&clip_val)?;
 
         // Update block offset and anchor predicted values
-        let mut new_anchor_slices = Vec::with_capacity(b);
-        for batch_idx in 0..b {
-            let is_cpm_b = patch_cpm_mask.i((batch_idx, i))?.to_scalar::<f32>()? > 0.5;
-            let cur_bo = block_offset[batch_idx];
+        if b == 1 {
+            let is_cpm_b = cpm_mask_host[0][i] > 0.5;
+            let cur_bo = block_offset[0];
             let new_bo = if is_cpm_b {
                 (cur_bo + 1) % rolls
             } else {
                 0
             };
-            block_offset[batch_idx] = new_bo;
-
-            let should_update = new_bo == 0;
-            if should_update {
-                let updated_anchor_b = clamped.i(batch_idx)?;
-                new_anchor_slices.push(updated_anchor_b.unsqueeze(0)?);
-            } else {
-                let old_anchor_b = anchor_predicted_values.i(batch_idx)?;
-                new_anchor_slices.push(old_anchor_b.unsqueeze(0)?);
+            block_offset[0] = new_bo;
+            if new_bo == 0 {
+                anchor_predicted_values = clamped;
             }
+        } else {
+            let mut new_anchor_slices = Vec::with_capacity(b);
+            for batch_idx in 0..b {
+                let is_cpm_b = cpm_mask_host[batch_idx][i] > 0.5;
+                let cur_bo = block_offset[batch_idx];
+                let new_bo = if is_cpm_b {
+                    (cur_bo + 1) % rolls
+                } else {
+                    0
+                };
+                block_offset[batch_idx] = new_bo;
+
+                let should_update = new_bo == 0;
+                if should_update {
+                    let updated_anchor_b = clamped.i(batch_idx)?;
+                    new_anchor_slices.push(updated_anchor_b.unsqueeze(0)?);
+                } else {
+                    let old_anchor_b = anchor_predicted_values.i(batch_idx)?;
+                    new_anchor_slices.push(old_anchor_b.unsqueeze(0)?);
+                }
+            }
+            anchor_predicted_values = Tensor::cat(&new_anchor_slices.iter().collect::<Vec<_>>(), 0)?;
         }
-        anchor_predicted_values = Tensor::cat(&new_anchor_slices.iter().collect::<Vec<_>>(), 0)?;
 
         carry_n = out_n;
         carry_mu = out_mu.clone();

@@ -1,8 +1,9 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use timesfm::{
+    backtest_univariate,
     data::{read_csv, write_forecast_csv},
-    ForecastOptions, Result, TimesFMForecaster,
+    BacktestConfig, ForecastOptions, Result, TimesFMForecaster,
 };
 
 #[derive(Parser, Debug)]
@@ -67,6 +68,40 @@ enum Commands {
     },
     /// Run Model Context Protocol (MCP) server over stdio
     Mcp {
+        /// Pretrained model name or local directory path
+        #[arg(short, long, default_value = "google/timesfm-3.0-pytorch")]
+        model: String,
+
+        /// Device to run inference on: 'cpu', 'metal', or 'cuda'
+        #[arg(short, long, default_value = "cpu")]
+        device: String,
+
+        /// Use lightweight mock forecaster instead of loading model weights
+        #[arg(long, default_value_t = false)]
+        mock: bool,
+    },
+    /// Run rolling-origin walk-forward backtesting on a CSV time series
+    Backtest {
+        /// Path to input CSV file containing time series columns
+        #[arg(short, long)]
+        input: PathBuf,
+
+        /// Historical context window length per split
+        #[arg(short, long, default_value_t = 64)]
+        context_len: usize,
+
+        /// Forecast horizon evaluated at each rolling origin
+        #[arg(long, default_value_t = 24)]
+        horizon: usize,
+
+        /// Stride (step size) between consecutive rolling origins
+        #[arg(short, long, default_value_t = 24)]
+        stride: usize,
+
+        /// Use expanding context window instead of sliding fixed window
+        #[arg(long, default_value_t = false)]
+        expanding: bool,
+
         /// Pretrained model name or local directory path
         #[arg(short, long, default_value = "google/timesfm-3.0-pytorch")]
         model: String,
@@ -246,6 +281,69 @@ async fn main() -> Result<()> {
                 let forecaster = TimesFMForecaster::from_pretrained(&model, device).await?;
                 eprintln!("Starting TimesFM MCP server on stdio...");
                 timesfm::run_mcp_server(std::sync::Arc::new(forecaster)).await?;
+            }
+        }
+        Commands::Backtest {
+            input,
+            context_len,
+            horizon,
+            stride,
+            expanding,
+            model,
+            device: dev_str,
+            mock,
+        } => {
+            println!("Reading input data from '{:?}'...", input);
+            let columns = read_csv(&input)?;
+            println!(
+                "Loaded {} series with {} total points",
+                columns.len(),
+                columns[0].len()
+            );
+
+            let bt_cfg = BacktestConfig {
+                context_len,
+                horizon,
+                stride,
+                expanding_window: expanding,
+            };
+
+            let forecaster_box: Box<dyn timesfm::mcp::Forecaster> = if mock {
+                Box::new(timesfm::mcp::MockForecaster::default())
+            } else {
+                let device = match dev_str.to_lowercase().as_str() {
+                    #[cfg(feature = "metal")]
+                    "metal" => candle_core::Device::new_metal(0)?,
+                    #[cfg(feature = "cuda")]
+                    "cuda" => candle_core::Device::new_cuda(0)?,
+                    "cpu" => candle_core::Device::Cpu,
+                    other => {
+                        eprintln!(
+                            "Warning: Device '{}' not recognized or feature not enabled, defaulting to CPU",
+                            other
+                        );
+                        candle_core::Device::Cpu
+                    }
+                };
+                println!("Loading model '{}' on device {:?}...", model, device);
+                Box::new(TimesFMForecaster::from_pretrained(&model, device).await?)
+            };
+
+            for (i, series) in columns.iter().enumerate() {
+                let res = backtest_univariate(forecaster_box.as_ref(), series, &bt_cfg)?;
+                println!(
+                    "Series {} ({} splits, C={}, H={}): MAE={:.4}, RMSE={:.4}, sMAPE={:.2}%, WAPE={:.4}, CRPS={:.4}, 80%-PI-Coverage={:.1}%",
+                    i,
+                    res.num_splits,
+                    context_len,
+                    horizon,
+                    res.mean_mae,
+                    res.mean_rmse,
+                    res.mean_smape,
+                    res.mean_wape,
+                    res.mean_crps.unwrap_or(0.0),
+                    res.mean_coverage_80.unwrap_or(0.0) * 100.0
+                );
             }
         }
     }

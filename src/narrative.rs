@@ -318,6 +318,7 @@ pub fn generate_forecast_narrative_with_engine(
         max_tokens: Some(512),
         permissive: true,
         seed: None,
+        use_case: None,
     };
 
     match engine.generate(&req) {

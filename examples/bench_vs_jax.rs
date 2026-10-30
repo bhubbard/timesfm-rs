@@ -211,6 +211,40 @@ fn main() -> anyhow::Result<()> {
         bt_res.mean_rmse,
         bt_res.mean_crps.unwrap_or(0.0)
     );
+
+    // 5. Statistical Baselines & Inverse-MAE Ensemble Calibration
+    println!("\n[5/5] Benchmarking Statistical Baselines & Ensemble Forecaster...");
+    use std::sync::Arc;
+    use timesfm::mcp::Forecaster;
+    use timesfm::{
+        DriftForecaster, EnsembleForecaster, HoltLinearForecaster, NaiveForecaster,
+        SeasonalNaiveForecaster,
+    };
+
+    let models: Vec<Arc<dyn Forecaster>> = vec![
+        Arc::new(NaiveForecaster::default()),
+        Arc::new(SeasonalNaiveForecaster::new(Some(32))),
+        Arc::new(DriftForecaster::default()),
+        Arc::new(HoltLinearForecaster::new(0.4, 0.2, 0.98)),
+    ];
+    let ensemble = EnsembleForecaster::fit_inverse_mae_weights(models, &context, &bt_cfg)?;
+    let ens_bt = backtest_univariate(&ensemble, &context, &bt_cfg)?;
+    println!(
+        "  - Fitted Inverse-MAE Ensemble Weights : {:?}",
+        ensemble
+            .weights
+            .iter()
+            .map(|w| format!("{:.3}", w))
+            .collect::<Vec<_>>()
+    );
+    println!(
+        "  - Ensemble Walk-Forward ({}xH=32)      : Mean MAE={:.4}, Mean RMSE={:.4}, Mean CRPS={:.4}",
+        ens_bt.num_splits,
+        ens_bt.mean_mae,
+        ens_bt.mean_rmse,
+        ens_bt.mean_crps.unwrap_or(0.0)
+    );
+
     println!("\nAll benchmark checks completed successfully.");
     Ok(())
 }

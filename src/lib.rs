@@ -10,7 +10,7 @@ pub mod model;
 pub mod util;
 
 pub use baselines::{
-    normal_quantile, DriftForecaster, HoltLinearForecaster, NaiveForecaster,
+    normal_quantile, DriftForecaster, EnsembleForecaster, HoltLinearForecaster, NaiveForecaster,
     SeasonalNaiveForecaster,
 };
 pub use config::{

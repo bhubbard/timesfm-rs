@@ -8,9 +8,9 @@ use timesfm::{
     mape, mase,
     mcp::{handle_message, Forecaster, MockForecaster},
     mse, normal_quantile, pinball_loss, prediction_interval_coverage, rmse, smape, wape,
-    BacktestConfig, DriftForecaster, ForecastOptions, ForecastOutput, HoltLinearForecaster,
-    NaiveForecaster, SeasonalNaiveForecaster, TimesFM2p5Config, TimesFM2p5Forecaster,
-    TimesFM2p5Model,
+    BacktestConfig, DriftForecaster, EnsembleForecaster, ForecastOptions, ForecastOutput,
+    HoltLinearForecaster, NaiveForecaster, SeasonalNaiveForecaster, TimesFM2p5Config,
+    TimesFM2p5Forecaster, TimesFM2p5Model,
 };
 
 fn create_v25_forecaster() -> timesfm::Result<TimesFM2p5Forecaster> {
@@ -385,6 +385,47 @@ fn test_statistical_baseline_forecasters() -> timesfm::Result<()> {
     let holt = HoltLinearForecaster::new(0.8, 0.2, 1.0);
     let holt_out = holt.forecast_univariate(&linear_ctx, 4, true)?;
     assert!(holt_out.forecast[0][3] > holt_out.forecast[0][0]);
+
+    Ok(())
+}
+
+#[test]
+fn test_ensemble_forecaster_and_inverse_mae_fitting() -> timesfm::Result<()> {
+    use std::sync::Arc;
+
+    // On a pure linear series y = 10 + 4*t, DriftForecaster has ~0 MAE whereas NaiveForecaster has large MAE.
+    // Inverse-MAE weight fitting must assign a much higher weight (> 0.99) to DriftForecaster!
+    let linear_series: Vec<f32> = (0..40).map(|t| 10.0 + 4.0 * (t as f32)).collect();
+    let naive: Arc<dyn Forecaster> = Arc::new(NaiveForecaster::default());
+    let drift: Arc<dyn Forecaster> = Arc::new(DriftForecaster::default());
+
+    let bt_cfg = BacktestConfig {
+        context_len: 16,
+        horizon: 4,
+        stride: 8,
+        expanding_window: false,
+    };
+
+    let ensemble = EnsembleForecaster::fit_inverse_mae_weights(
+        vec![naive, drift],
+        &linear_series,
+        &bt_cfg,
+    )?;
+
+    assert_eq!(ensemble.weights.len(), 2);
+    assert!((ensemble.weights[0] + ensemble.weights[1] - 1.0).abs() < 1e-5);
+    assert!(
+        ensemble.weights[1] > 0.99,
+        "DriftForecaster should receive >99% weight on exact linear series, got {:?}",
+        ensemble.weights
+    );
+
+    let out = ensemble.forecast_univariate(&linear_series[..20], 4, true)?;
+    // Step 1 forecast should be ~ 10 + 4*20 = 90.0
+    assert!((out.forecast[0][0] - 90.0).abs() < 0.2);
+    let qs = out.quantiles.unwrap();
+    assert_eq!(qs[0].len(), 4);
+    assert_eq!(qs[0][0].len(), 9);
 
     Ok(())
 }

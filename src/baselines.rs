@@ -1,11 +1,13 @@
 //! Classical statistical baseline forecasters (`NaiveForecaster`, `SeasonalNaiveForecaster`,
-//! `DriftForecaster`, `HoltLinearForecaster`) implementing the `Forecaster` trait with
-//! analytical Gaussian quantile intervals for benchmarking and ensembling with TimesFM.
+//! `DriftForecaster`, `HoltLinearForecaster`) and multi-model `EnsembleForecaster`
+//! implementing the `Forecaster` trait with analytical Gaussian quantile intervals.
+
+use std::sync::Arc;
 
 use crate::error::{Result, TimesfmError};
 use crate::forecaster::ForecastOutput;
 use crate::mcp::Forecaster;
-use crate::metrics::detect_seasonality;
+use crate::metrics::{backtest_univariate, detect_seasonality, BacktestConfig};
 use crate::util::linear_interpolation;
 
 /// Standard normal quantile (probit) approximation using Beasley-Springer-Moro / Acklam rational approximation.
@@ -519,5 +521,160 @@ impl Forecaster for HoltLinearForecaster {
 
     fn quantile_levels(&self) -> Vec<f64> {
         self.quantiles.clone()
+    }
+}
+
+/// Multi-model ensemble forecaster that combines point predictions and quantile distributions
+/// via weighted linear combination (Vincentization) across arbitrary `Forecaster` implementations.
+pub struct EnsembleForecaster {
+    pub models: Vec<Arc<dyn Forecaster>>,
+    pub weights: Vec<f32>,
+}
+
+impl EnsembleForecaster {
+    /// Creates a new `EnsembleForecaster` from a non-empty list of forecasters and optional weights.
+    /// If `weights` is `None`, uniform weights $1/M$ are assigned. Provided weights are normalized to sum to 1.0.
+    pub fn new(models: Vec<Arc<dyn Forecaster>>, weights: Option<Vec<f32>>) -> Result<Self> {
+        if models.is_empty() {
+            return Err(TimesfmError::Config(
+                "EnsembleForecaster requires at least one constituent model".to_string(),
+            ));
+        }
+
+        let num_models = models.len();
+        let norm_weights = match weights {
+            Some(ws) => {
+                if ws.len() != num_models {
+                    return Err(TimesfmError::Config(format!(
+                        "Weights length ({}) must match number of models ({})",
+                        ws.len(),
+                        num_models
+                    )));
+                }
+                let mut clamped = Vec::with_capacity(num_models);
+                let mut sum = 0.0f32;
+                for &w in &ws {
+                    let pos = if w.is_finite() && w > 0.0 { w } else { 0.0 };
+                    clamped.push(pos);
+                    sum += pos;
+                }
+                if sum <= 1e-8 {
+                    vec![1.0 / (num_models as f32); num_models]
+                } else {
+                    clamped.into_iter().map(|w| w / sum).collect()
+                }
+            }
+            None => vec![1.0 / (num_models as f32); num_models],
+        };
+
+        Ok(Self {
+            models,
+            weights: norm_weights,
+        })
+    }
+
+    /// Calibrates ensemble weights automatically via inverse-MAE backtesting on a `calibration_series`:
+    /// $w_m \propto \frac{1}{\text{MAE}_m + 10^{-4}}$, normalized so $\sum_m w_m = 1$.
+    pub fn fit_inverse_mae_weights(
+        models: Vec<Arc<dyn Forecaster>>,
+        calibration_series: &[f32],
+        backtest_config: &BacktestConfig,
+    ) -> Result<Self> {
+        if models.is_empty() {
+            return Err(TimesfmError::Config(
+                "EnsembleForecaster requires at least one constituent model".to_string(),
+            ));
+        }
+
+        let mut raw_weights = Vec::with_capacity(models.len());
+        for model in &models {
+            let bt = backtest_univariate(model.as_ref(), calibration_series, backtest_config)?;
+            let inv_mae = 1.0 / (bt.mean_mae.max(0.0) + 1e-4);
+            raw_weights.push(inv_mae);
+        }
+
+        Self::new(models, Some(raw_weights))
+    }
+}
+
+impl Forecaster for EnsembleForecaster {
+    fn forecast_univariate(
+        &self,
+        context: &[f32],
+        horizon: usize,
+        return_quantiles: bool,
+    ) -> Result<ForecastOutput> {
+        self.forecast_multivariate(&[context], horizon, None, None, return_quantiles)
+    }
+
+    fn forecast_multivariate(
+        &self,
+        contexts: &[&[f32]],
+        horizon: usize,
+        past_only_covariates: Option<&[&[f32]]>,
+        past_future_covariates: Option<&[&[f32]]>,
+        return_quantiles: bool,
+    ) -> Result<ForecastOutput> {
+        if contexts.is_empty() || contexts[0].is_empty() {
+            return Err(TimesfmError::Inference("Contexts cannot be empty".to_string()));
+        }
+        if horizon == 0 {
+            return Err(TimesfmError::Inference("Horizon must be > 0".to_string()));
+        }
+
+        let num_variates = contexts.len();
+        let num_q = self.quantile_levels().len();
+
+        let mut combined_forecast = vec![vec![0.0f32; horizon]; num_variates];
+        let mut combined_quantiles = if return_quantiles {
+            Some(vec![vec![vec![0.0f32; num_q]; horizon]; num_variates])
+        } else {
+            None
+        };
+
+        for (m_idx, model) in self.models.iter().enumerate() {
+            let w = self.weights[m_idx];
+            if w <= 0.0 {
+                continue;
+            }
+            let out = model.forecast_multivariate(
+                contexts,
+                horizon,
+                past_only_covariates,
+                past_future_covariates,
+                return_quantiles,
+            )?;
+
+            for v in 0..num_variates.min(out.forecast.len()) {
+                for h in 0..horizon.min(out.forecast[v].len()) {
+                    combined_forecast[v][h] += w * out.forecast[v][h];
+                }
+            }
+
+            if let (Some(ref mut comb_q), Some(ref mod_q)) =
+                (&mut combined_quantiles, &out.quantiles)
+            {
+                for v in 0..num_variates.min(mod_q.len()) {
+                    for h in 0..horizon.min(mod_q[v].len()) {
+                        for q in 0..num_q.min(mod_q[v][h].len()) {
+                            comb_q[v][h][q] += w * mod_q[v][h][q];
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(ForecastOutput {
+            ts_id: None,
+            forecast: combined_forecast,
+            quantiles: combined_quantiles,
+        })
+    }
+
+    fn quantile_levels(&self) -> Vec<f64> {
+        self.models
+            .first()
+            .map(|m| m.quantile_levels())
+            .unwrap_or_else(default_deciles)
     }
 }

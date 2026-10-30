@@ -336,3 +336,49 @@ fn test_forecaster_evaluate_policy_helper_method() {
         Some(serde_json::Value::String("scale_up".into()))
     );
 }
+
+#[test]
+fn test_multivariate_guardrails_and_policy_decisions() {
+    use timesfm::{check_multivariate_guardrails, evaluate_multivariate_policy_decisions};
+
+    let s_valid: Vec<f32> = (0..32).map(|i| 10.0 + (i as f32).sin() * 5.0).collect();
+    let s_flat = vec![50.0f32; 32];
+    let s_valid2: Vec<f32> = (0..32).map(|i| 100.0 + (i as f32) * 2.0).collect();
+
+    let report = check_multivariate_guardrails(&[&s_valid, &s_flat, &s_valid2])
+        .expect("Multivariate guardrail check should succeed");
+    assert!(!report.passed_all);
+    assert!(report.should_abstain_any);
+    assert_eq!(report.failed_variates, vec![1]);
+    assert_eq!(report.variates.len(), 3);
+    assert!(report.variates[0].passed);
+    assert!(!report.variates[1].passed);
+    assert!(report.variates[2].passed);
+
+    // Multivariate policy decision evaluation across 2 variates:
+    // Variate 0: calm (maintain)
+    // Variate 1: spiking p90 > 100 (scale_up)
+    let horizon = 6;
+    let q_calm: Vec<Vec<f32>> = (0..horizon)
+        .map(|_| vec![30.0, 32.0, 35.0, 38.0, 40.0, 42.0, 45.0, 48.0, 50.0])
+        .collect();
+    let q_spike: Vec<Vec<f32>> = (0..horizon)
+        .map(|_| vec![95.0, 100.0, 105.0, 110.0, 120.0, 125.0, 130.0, 135.0, 140.0])
+        .collect();
+
+    let mv_forecast = ForecastOutput {
+        ts_id: Some("multivariate-cluster".into()),
+        forecast: vec![vec![40.0; horizon], vec![120.0; horizon]],
+        quantiles: Some(vec![q_calm, q_spike]),
+    };
+
+    let policy = ForecastPolicy::autoscaling(100.0, 2, 60.0);
+    let decisions = evaluate_multivariate_policy_decisions(&mv_forecast, &policy)
+        .expect("Multivariate policy evaluation should succeed");
+
+    assert_eq!(decisions.len(), 2);
+    assert_eq!(decisions[0].action, "maintain");
+    assert_eq!(decisions[0].triggered_rule, None);
+    assert_eq!(decisions[1].action, "scale_up");
+    assert_eq!(decisions[1].triggered_rule.as_deref(), Some("scale_up_rule"));
+}

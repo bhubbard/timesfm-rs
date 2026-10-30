@@ -37,9 +37,12 @@ pub mod decide;
 
 #[cfg(feature = "zev")]
 pub use decide::{
+    check_multivariate_guardrails, check_multivariate_guardrails_with_config,
     check_series_guardrails, check_series_guardrails_with_config, evaluate_forecast_policy,
-    evaluate_policy_decision, ComparisonOp, ForecastMetric, ForecastPolicy, ForecastPolicyRule,
-    GuardrailConfig, GuardrailResult, PolicyDecision, ThresholdRule,
+    evaluate_forecast_policy_for_variate, evaluate_multivariate_policy_decisions,
+    evaluate_policy_decision, evaluate_policy_decision_for_variate, ComparisonOp, ForecastMetric,
+    ForecastPolicy, ForecastPolicyRule, GuardrailConfig, GuardrailResult,
+    MultivariateGuardrailReport, PolicyDecision, ThresholdRule,
 };
 
 #[cfg(feature = "narrative")]

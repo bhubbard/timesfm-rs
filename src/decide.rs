@@ -213,6 +213,63 @@ pub fn check_series_guardrails_with_config(
     })
 }
 
+/// Aggregated pre-flight guardrail report across a multivariate batch of time series.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MultivariateGuardrailReport {
+    /// Whether every variate in the batch passed guardrails.
+    pub passed_all: bool,
+    /// Whether any variate in the batch triggered abstention.
+    pub should_abstain_any: bool,
+    /// Indices of variates that failed guardrail checks.
+    pub failed_variates: Vec<usize>,
+    /// Per-variate guardrail reports.
+    pub variates: Vec<GuardrailResult>,
+}
+
+/// Checks pre-flight sanity guardrails across all variates in a multivariate batch using default configuration.
+pub fn check_multivariate_guardrails(contexts: &[&[f32]]) -> Result<MultivariateGuardrailReport> {
+    check_multivariate_guardrails_with_config(contexts, &GuardrailConfig::default())
+}
+
+/// Checks pre-flight sanity guardrails across all variates in a multivariate batch using custom configuration.
+pub fn check_multivariate_guardrails_with_config(
+    contexts: &[&[f32]],
+    config: &GuardrailConfig,
+) -> Result<MultivariateGuardrailReport> {
+    if contexts.is_empty() {
+        return Ok(MultivariateGuardrailReport {
+            passed_all: false,
+            should_abstain_any: true,
+            failed_variates: vec![],
+            variates: vec![],
+        });
+    }
+
+    let mut variates = Vec::with_capacity(contexts.len());
+    let mut failed_variates = Vec::new();
+    let mut passed_all = true;
+    let mut should_abstain_any = false;
+
+    for (idx, ctx) in contexts.iter().enumerate() {
+        let res = check_series_guardrails_with_config(ctx, config)?;
+        if !res.passed {
+            passed_all = false;
+            failed_variates.push(idx);
+        }
+        if res.should_abstain {
+            should_abstain_any = true;
+        }
+        variates.push(res);
+    }
+
+    Ok(MultivariateGuardrailReport {
+        passed_all,
+        should_abstain_any,
+        failed_variates,
+        variates,
+    })
+}
+
 /// Target metric in a forecast trajectory evaluated by a policy rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ForecastMetric {
@@ -529,12 +586,28 @@ pub fn resolve_policy(schema: &str) -> Result<ForecastPolicy> {
     }
 }
 
-/// Evaluates a post-forecast policy against a `ForecastOutput` using `zev::ZevEngine`.
+/// Evaluates a post-forecast policy against variate 0 of a `ForecastOutput` using `zev::ZevEngine`.
 ///
 /// Maps TimesFM quantiles into Zev questions/options and executes calibrated order-invariant
 /// decision decoding.
 pub fn evaluate_forecast_policy(forecast: &ForecastOutput, schema: &str) -> Result<ZevAnswer> {
-    let extracted = extract_quantiles(forecast, 0);
+    evaluate_forecast_policy_for_variate(forecast, 0, schema)
+}
+
+/// Evaluates a post-forecast policy against a specific `variate_idx` of a `ForecastOutput` using `zev::ZevEngine`.
+pub fn evaluate_forecast_policy_for_variate(
+    forecast: &ForecastOutput,
+    variate_idx: usize,
+    schema: &str,
+) -> Result<ZevAnswer> {
+    if variate_idx >= forecast.forecast.len() {
+        return Err(TimesfmError::Policy(format!(
+            "variate_idx {} out of bounds for forecast with {} variates",
+            variate_idx,
+            forecast.forecast.len()
+        )));
+    }
+    let extracted = extract_quantiles(forecast, variate_idx);
 
     // If schema is directly a Zev Question JSON:
     if schema.trim().starts_with('{') {
@@ -689,12 +762,28 @@ pub fn evaluate_forecast_policy(forecast: &ForecastOutput, schema: &str) -> Resu
         .ok_or_else(|| TimesfmError::Inference("ZevEngine returned no answers".to_string()))
 }
 
-/// Evaluates a policy decision returning a structured `PolicyDecision`.
+/// Evaluates a policy decision for variate 0 returning a structured `PolicyDecision`.
 pub fn evaluate_policy_decision(
     forecast: &ForecastOutput,
     policy: &ForecastPolicy,
 ) -> Result<PolicyDecision> {
-    let extracted = extract_quantiles(forecast, 0);
+    evaluate_policy_decision_for_variate(forecast, 0, policy)
+}
+
+/// Evaluates a policy decision for a specific `variate_idx` returning a structured `PolicyDecision`.
+pub fn evaluate_policy_decision_for_variate(
+    forecast: &ForecastOutput,
+    variate_idx: usize,
+    policy: &ForecastPolicy,
+) -> Result<PolicyDecision> {
+    if variate_idx >= forecast.forecast.len() {
+        return Err(TimesfmError::Policy(format!(
+            "variate_idx {} out of bounds for forecast with {} variates",
+            variate_idx,
+            forecast.forecast.len()
+        )));
+    }
+    let extracted = extract_quantiles(forecast, variate_idx);
     let triggered_rule = policy
         .rules
         .iter()
@@ -711,7 +800,7 @@ pub fn evaluate_policy_decision(
         .map(|r| r.name.clone());
 
     let schema_json = serde_json::to_string(policy)?;
-    let zev_answer = evaluate_forecast_policy(forecast, &schema_json)?;
+    let zev_answer = evaluate_forecast_policy_for_variate(forecast, variate_idx, &schema_json)?;
     let action = match &zev_answer.decision {
         Some(serde_json::Value::String(s)) => s.clone(),
         Some(v) => v.to_string(),
@@ -727,4 +816,17 @@ pub fn evaluate_policy_decision(
         ),
         zev_answer: Some(zev_answer),
     })
+}
+
+/// Evaluates a `ForecastPolicy` across every variate in a multivariate `ForecastOutput`.
+pub fn evaluate_multivariate_policy_decisions(
+    forecast: &ForecastOutput,
+    policy: &ForecastPolicy,
+) -> Result<Vec<PolicyDecision>> {
+    let num_variates = forecast.forecast.len();
+    let mut decisions = Vec::with_capacity(num_variates);
+    for v in 0..num_variates {
+        decisions.push(evaluate_policy_decision_for_variate(forecast, v, policy)?);
+    }
+    Ok(decisions)
 }

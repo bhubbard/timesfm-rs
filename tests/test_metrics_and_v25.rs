@@ -7,8 +7,10 @@ use timesfm::{
     decompose_series, detect_quantile_anomalies, detect_seasonality, evaluate_forecast_output, mae,
     mape, mase,
     mcp::{handle_message, Forecaster, MockForecaster},
-    mse, pinball_loss, prediction_interval_coverage, rmse, smape, wape, BacktestConfig,
-    ForecastOptions, ForecastOutput, TimesFM2p5Config, TimesFM2p5Forecaster, TimesFM2p5Model,
+    mse, normal_quantile, pinball_loss, prediction_interval_coverage, rmse, smape, wape,
+    BacktestConfig, DriftForecaster, ForecastOptions, ForecastOutput, HoltLinearForecaster,
+    NaiveForecaster, SeasonalNaiveForecaster, TimesFM2p5Config, TimesFM2p5Forecaster,
+    TimesFM2p5Model,
 };
 
 fn create_v25_forecaster() -> timesfm::Result<TimesFM2p5Forecaster> {
@@ -335,6 +337,54 @@ fn test_seasonality_detection_and_decomposition() -> timesfm::Result<()> {
         let recon = decomp.trend[t] + decomp.seasonal[t] + decomp.residual[t];
         assert!((recon - series[t]).abs() < 1e-4);
     }
+
+    Ok(())
+}
+
+#[test]
+fn test_statistical_baseline_forecasters() -> timesfm::Result<()> {
+    // 1. Probit symmetry and standard quantiles
+    assert!(normal_quantile(0.5).abs() < 1e-6);
+    assert!((normal_quantile(0.9) - 1.28155).abs() < 1e-3);
+    assert!((normal_quantile(0.1) + 1.28155).abs() < 1e-3);
+
+    // 2. DriftForecaster on exact linear series y = 10 + 3 * t
+    let linear_ctx: Vec<f32> = (0..20).map(|t| 10.0 + 3.0 * (t as f32)).collect();
+    let drift = DriftForecaster::default();
+    let drift_out = drift.forecast_univariate(&linear_ctx, 5, true)?;
+    for h in 1..=5 {
+        let expected = 10.0 + 3.0 * ((19 + h) as f32);
+        assert!((drift_out.forecast[0][h - 1] - expected).abs() < 1e-4);
+    }
+
+    // 3. SeasonalNaiveForecaster with explicit and auto-detected period 4
+    let mut seasonal_ctx = Vec::with_capacity(24);
+    let cycle = [10.0f32, 20.0, 30.0, 40.0];
+    for _ in 0..6 {
+        seasonal_ctx.extend_from_slice(&cycle);
+    }
+    let snaive = SeasonalNaiveForecaster::new(Some(4));
+    let snaive_out = snaive.forecast_univariate(&seasonal_ctx, 8, true)?;
+    assert_eq!(
+        snaive_out.forecast[0],
+        vec![10.0, 20.0, 30.0, 40.0, 10.0, 20.0, 30.0, 40.0]
+    );
+
+    // Auto-detected period
+    let snaive_auto = SeasonalNaiveForecaster::default();
+    let snaive_auto_out = snaive_auto.forecast_univariate(&seasonal_ctx, 4, true)?;
+    assert_eq!(snaive_auto_out.forecast[0], vec![10.0, 20.0, 30.0, 40.0]);
+
+    // 4. NaiveForecaster & HoltLinearForecaster
+    let naive = NaiveForecaster::default();
+    let naive_out = naive.forecast_univariate(&linear_ctx, 4, true)?;
+    assert_eq!(naive_out.forecast[0], vec![67.0; 4]);
+    let n_qs = naive_out.quantiles.unwrap();
+    assert!(n_qs[0][0][0] <= n_qs[0][0][4] && n_qs[0][0][4] <= n_qs[0][0][8]);
+
+    let holt = HoltLinearForecaster::new(0.8, 0.2, 1.0);
+    let holt_out = holt.forecast_univariate(&linear_ctx, 4, true)?;
+    assert!(holt_out.forecast[0][3] > holt_out.forecast[0][0]);
 
     Ok(())
 }

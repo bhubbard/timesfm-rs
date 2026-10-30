@@ -1,3 +1,4 @@
+pub mod baselines;
 pub mod config;
 pub mod data;
 pub mod error;
@@ -8,6 +9,10 @@ pub mod metrics;
 pub mod model;
 pub mod util;
 
+pub use baselines::{
+    normal_quantile, DriftForecaster, HoltLinearForecaster, NaiveForecaster,
+    SeasonalNaiveForecaster,
+};
 pub use config::{
     Activation, NormType, ResidualBlockConfig, StackedTransformersConfig, TimesFM2p5Config,
     TimesFM3Config, TransformerConfig,

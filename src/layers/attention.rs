@@ -11,6 +11,7 @@ pub struct MultiHeadAttention {
     pub in_features: usize,
     pub head_dim: usize,
     pub causal_attention: bool,
+    pub debug_no_masking: bool,
     pub rescale_logits: bool,
     pub query_proj: Linear,
     pub key_proj: Linear,
@@ -18,17 +19,48 @@ pub struct MultiHeadAttention {
     pub out_proj: Linear,
     pub query_ln: Option<RMSNorm>,
     pub key_ln: Option<RMSNorm>,
+    pub value_ln: Option<RMSNorm>,
     pub per_dim_scale: Option<PerDimScale>,
     pub rotary_position_embedding: Option<RotaryPositionalEmbedding>,
 }
 
 impl MultiHeadAttention {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         num_heads: usize,
         in_features: usize,
         causal_attention: bool,
         use_bias: bool,
         qk_norm: NormType,
+        use_per_dim_scale: bool,
+        use_rope: bool,
+        rescale_logits: bool,
+        vb: VarBuilder,
+    ) -> CResult<Self> {
+        Self::new_with_options(
+            num_heads,
+            in_features,
+            causal_attention,
+            false,
+            use_bias,
+            qk_norm,
+            NormType::None,
+            use_per_dim_scale,
+            use_rope,
+            rescale_logits,
+            vb,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_options(
+        num_heads: usize,
+        in_features: usize,
+        causal_attention: bool,
+        debug_no_masking: bool,
+        use_bias: bool,
+        qk_norm: NormType,
+        v_norm: NormType,
         use_per_dim_scale: bool,
         use_rope: bool,
         rescale_logits: bool,
@@ -68,6 +100,11 @@ impl MultiHeadAttention {
             NormType::None => (None, None),
         };
 
+        let value_ln = match v_norm {
+            NormType::Rms => Some(RMSNorm::new(head_dim, 1e-6, Some(vb.pp("value_ln")))?),
+            NormType::None => None,
+        };
+
         let per_dim_scale = if use_per_dim_scale {
             Some(PerDimScale::new(head_dim, vb.pp("per_dim_scale"))?)
         } else {
@@ -90,6 +127,7 @@ impl MultiHeadAttention {
             in_features,
             head_dim,
             causal_attention,
+            debug_no_masking,
             rescale_logits,
             query_proj,
             key_proj,
@@ -97,6 +135,7 @@ impl MultiHeadAttention {
             out_proj,
             query_ln,
             key_ln,
+            value_ln,
             per_dim_scale,
             rotary_position_embedding,
         })
@@ -119,7 +158,7 @@ impl MultiHeadAttention {
         // Reshape to (b, n, num_heads, head_dim)
         let mut q = q_proj.reshape((batch_size, n_patches, self.num_heads, self.head_dim))?;
         let mut k = k_proj.reshape((batch_size, n_patches, self.num_heads, self.head_dim))?;
-        let v = v_proj.reshape((batch_size, n_patches, self.num_heads, self.head_dim))?;
+        let mut v = v_proj.reshape((batch_size, n_patches, self.num_heads, self.head_dim))?;
 
         // Apply RoPE
         if let Some(rope) = &self.rotary_position_embedding {
@@ -127,12 +166,15 @@ impl MultiHeadAttention {
             k = rope.forward(&k, segment_pos)?;
         }
 
-        // QK normalization
+        // QKV normalization
         if let Some(ln) = &self.query_ln {
             q = ln.forward(&q)?;
         }
         if let Some(ln) = &self.key_ln {
             k = ln.forward(&k)?;
+        }
+        if let Some(ln) = &self.value_ln {
+            v = ln.forward(&v)?;
         }
 
         // PerDimScale on Query
@@ -160,8 +202,8 @@ impl MultiHeadAttention {
         }
 
         // Build attention mask: (1, 1, n, n) or (b, 1, n, n)
-        // Only allocate causal matrix when causal_attention is enabled
-        let causal_mask = if self.causal_attention {
+        // Only allocate causal matrix when causal_attention is enabled and debug_no_masking is false
+        let causal_mask = if self.causal_attention && !self.debug_no_masking {
             let mut mask_vec = vec![0.0f32; n_patches * n_patches];
             for qi in 0..n_patches {
                 let row_offset = qi * n_patches;
@@ -175,12 +217,16 @@ impl MultiHeadAttention {
         };
 
         // Apply patch_mask (True / 1.0 = masked out) to key positions on compact (b, 1, 1, n) shape
-        let key_mask = if let Some(pm) = patch_mask {
-            let pm_exp = pm.unsqueeze(1)?.unsqueeze(2)?; // (b, 1, 1, n)
-            let mask_val = Tensor::full(-1e9f32, pm_exp.shape(), device)?;
-            let zeros = Tensor::zeros_like(&mask_val)?;
-            let pm_is_masked = pm_exp.gt(0.5)?;
-            Some(pm_is_masked.where_cond(&mask_val, &zeros)?)
+        let key_mask = if !self.debug_no_masking {
+            if let Some(pm) = patch_mask {
+                let pm_exp = pm.unsqueeze(1)?.unsqueeze(2)?; // (b, 1, 1, n)
+                let mask_val = Tensor::full(-1e9f32, pm_exp.shape(), device)?;
+                let zeros = Tensor::zeros_like(&mask_val)?;
+                let pm_is_masked = pm_exp.gt(0.5)?;
+                Some(pm_is_masked.where_cond(&mask_val, &zeros)?)
+            } else {
+                None
+            }
         } else {
             None
         };

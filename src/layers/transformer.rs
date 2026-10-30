@@ -34,12 +34,14 @@ impl MixingTransformer {
         let pre_seq_attn_ln = RMSNorm::new(config.model_dims, 1e-6, Some(vb.pp("pre_seq_attn_ln")))?;
         let post_seq_attn_ln = RMSNorm::new(config.model_dims, 1e-6, Some(vb.pp("post_seq_attn_ln")))?;
 
-        let seq_attn = MultiHeadAttention::new(
+        let seq_attn = MultiHeadAttention::new_with_options(
             config.num_heads,
             config.model_dims,
             config.causal_attention,
+            config.debug_no_masking,
             config.use_bias,
             config.qk_norm,
+            config.v_norm,
             true, // use_per_dim_scale
             config.use_rope_seq,
             rescale_logits,
@@ -49,12 +51,14 @@ impl MixingTransformer {
         let (pre_var_attn_ln, post_var_attn_ln, var_attn) = if use_variate_attention {
             let pre_ln = RMSNorm::new(config.model_dims, 1e-6, Some(vb.pp("pre_var_attn_ln")))?;
             let post_ln = RMSNorm::new(config.model_dims, 1e-6, Some(vb.pp("post_var_attn_ln")))?;
-            let attn = MultiHeadAttention::new(
+            let attn = MultiHeadAttention::new_with_options(
                 config.num_heads,
                 config.model_dims,
                 false, // causal_attention is false for variate attention
+                config.debug_no_masking,
                 config.use_bias,
                 config.qk_norm,
+                config.v_norm,
                 true,
                 config.use_rope_var,
                 rescale_logits,

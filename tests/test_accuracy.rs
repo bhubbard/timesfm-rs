@@ -148,3 +148,144 @@ fn test_linear_detrending_high_offset_numerical_stability() -> candle_core::Resu
 
     Ok(())
 }
+
+#[test]
+fn test_causal_attention_masking_invariance() -> candle_core::Result<()> {
+    use candle_core::IndexOp;
+    use candle_nn::{VarBuilder, VarMap};
+    use timesfm::config::NormType;
+    use timesfm::layers::attention::MultiHeadAttention;
+
+    let device = Device::Cpu;
+    let varmap = VarMap::new();
+    let vb = VarBuilder::from_varmap(&varmap, DType::F32, &device);
+
+    let attn = MultiHeadAttention::new_with_options(
+        4,
+        32,
+        true,  // causal_attention
+        false, // debug_no_masking
+        false,
+        NormType::Rms,
+        NormType::Rms, // v_norm enabled
+        true,
+        true,
+        true,
+        vb.pp("attn"),
+    )?;
+
+    let x1 = Tensor::randn(0.0f32, 1.0f32, (1, 6, 32), &device)?;
+    // Perturb patches 3, 4, 5 heavily while keeping patches 0, 1, 2 identical
+    let prefix = x1.i((.., 0..3, ..))?;
+    let suffix_perturbed = Tensor::randn(50.0f32, 10.0f32, (1, 3, 32), &device)?;
+    let x2 = Tensor::cat(&[&prefix, &suffix_perturbed], 1)?;
+
+    let out1 = attn.forward(&x1, None, None)?;
+    let out2 = attn.forward(&x2, None, None)?;
+
+    let diff_prefix = out1
+        .i((.., 0..3, ..))?
+        .sub(&out2.i((.., 0..3, ..))?)?
+        .abs()?
+        .max_all()?
+        .to_scalar::<f32>()?;
+    assert!(
+        diff_prefix < 1e-5,
+        "Causal attention violated: future perturbation leaked into past tokens (diff = {})",
+        diff_prefix
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_variate_attention_permutation_equivariance() -> candle_core::Result<()> {
+    use candle_core::IndexOp;
+    use candle_nn::{VarBuilder, VarMap};
+    use timesfm::config::{Activation, NormType, TransformerConfig};
+    use timesfm::layers::transformer::MixingTransformer;
+
+    let device = Device::Cpu;
+    let varmap = VarMap::new();
+    let vb = VarBuilder::from_varmap(&varmap, DType::F32, &device);
+
+    let cfg = TransformerConfig {
+        model_dims: 32,
+        hidden_dims: 32,
+        num_heads: 4,
+        attention_norm: NormType::Rms,
+        feedforward_norm: NormType::Rms,
+        qk_norm: NormType::Rms,
+        v_norm: NormType::Rms,
+        use_bias: false,
+        use_rope_seq: true,
+        use_rope_var: false, // Variate attention without positional RoPE is strictly permutation-equivariant
+        ff_activation: Activation::Silu,
+        deterministic: true,
+        causal_attention: true,
+        debug_no_masking: false,
+        training: false,
+        use_memory_efficient_attention: true,
+        paired_token_skip_second: false,
+        max_variates: 32,
+        use_sdpa: true,
+    };
+
+    let block = MixingTransformer::new(&cfg, true, vb.pp("block"))?;
+
+    let v0 = Tensor::randn(0.0f32, 1.0f32, (1, 1, 4, 32), &device)?;
+    let v1 = Tensor::randn(3.0f32, 1.5f32, (1, 1, 4, 32), &device)?;
+    let v2 = Tensor::randn(-2.0f32, 0.8f32, (1, 1, 4, 32), &device)?;
+
+    let x_orig = Tensor::cat(&[&v0, &v1, &v2], 1)?;
+    let x_perm = Tensor::cat(&[&v2, &v0, &v1], 1)?;
+    let mask = Tensor::zeros((1, 3, 4), DType::F32, &device)?;
+
+    let out_orig = block.forward(&x_orig, &mask)?;
+    let out_perm = block.forward(&x_perm, &mask)?;
+
+    let out_orig_reordered = Tensor::cat(
+        &[
+            &out_orig.i((.., 2..3, .., ..))?,
+            &out_orig.i((.., 0..1, .., ..))?,
+            &out_orig.i((.., 1..2, .., ..))?,
+        ],
+        1,
+    )?;
+
+    let max_diff = out_perm
+        .sub(&out_orig_reordered)?
+        .abs()?
+        .max_all()?
+        .to_scalar::<f32>()?;
+    assert!(
+        max_diff < 1e-4,
+        "Variate attention must be permutation-equivariant across variates when use_rope_var=false (diff = {})",
+        max_diff
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_nonlinear_input_transform_roundtrip_invariance() -> candle_core::Result<()> {
+    use timesfm::util::{apply_input_transform, invert_input_transform};
+
+    let device = Device::Cpu;
+    let vals = vec![-1000.0f32, -25.5, -1.0, -1e-4, 0.0, 1e-4, 1.0, 42.75, 5000.0];
+    let x = Tensor::from_vec(vals, (1, 1, 9), &device)?;
+
+    for transform in ["identity", "arcsinh", "signed_log1p"] {
+        let z = apply_input_transform(&x, transform)?;
+        let x_rec = invert_input_transform(&z, transform)?;
+        let max_err = x_rec.sub(&x)?.abs()?.max_all()?.to_scalar::<f32>()?;
+        assert!(
+            max_err < 1e-2,
+            "Roundtrip error for transform '{}' too high: {}",
+            transform,
+            max_err
+        );
+    }
+
+    Ok(())
+}

@@ -36,15 +36,26 @@ pub struct ForecastSummaryStats {
     pub max_bound: f32,
 }
 
-/// Computes summary statistics from a `ForecastOutput`.
+/// Computes summary statistics for variate 0 from a `ForecastOutput`.
 pub fn compute_summary_stats(forecast: &ForecastOutput) -> Result<ForecastSummaryStats> {
-    if forecast.forecast.is_empty() || forecast.forecast[0].is_empty() {
+    compute_summary_stats_for_variate(forecast, 0)
+}
+
+/// Computes summary statistics for a specific `variate_idx` from a `ForecastOutput`.
+pub fn compute_summary_stats_for_variate(
+    forecast: &ForecastOutput,
+    variate_idx: usize,
+) -> Result<ForecastSummaryStats> {
+    if forecast.forecast.is_empty()
+        || variate_idx >= forecast.forecast.len()
+        || forecast.forecast[variate_idx].is_empty()
+    {
         return Err(TimesfmError::Inference(
             "Forecast series is empty; cannot compute summary statistics".to_string(),
         ));
     }
 
-    let series = &forecast.forecast[0];
+    let series = &forecast.forecast[variate_idx];
     let starting_value = series[0];
     let final_median = *series.last().unwrap();
 
@@ -58,8 +69,10 @@ pub fn compute_summary_stats(forecast: &ForecastOutput) -> Result<ForecastSummar
     };
 
     let (max_spread, min_bound, max_bound) = match &forecast.quantiles {
-        Some(q_variates) if !q_variates.is_empty() && !q_variates[0].is_empty() => {
-            let v_quantiles = &q_variates[0];
+        Some(q_variates)
+            if variate_idx < q_variates.len() && !q_variates[variate_idx].is_empty() =>
+        {
+            let v_quantiles = &q_variates[variate_idx];
             let mut max_sp: f32 = 0.0;
             let mut min_b = f32::INFINITY;
             let mut max_b = f32::NEG_INFINITY;
@@ -123,6 +136,69 @@ pub fn compute_summary_stats(forecast: &ForecastOutput) -> Result<ForecastSummar
         max_spread,
         min_bound,
         max_bound,
+    })
+}
+
+/// Cross-variate aggregated summary statistics for a multivariate `ForecastOutput`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MultivariateSummaryStats {
+    pub num_variates: usize,
+    pub variate_stats: Vec<ForecastSummaryStats>,
+    pub mean_drift_percent: f32,
+    pub max_drift_variate: usize,
+    pub max_volatility_variate: usize,
+    pub global_min_bound: f32,
+    pub global_max_bound: f32,
+}
+
+/// Computes summary statistics across all variates in a multivariate `ForecastOutput`.
+pub fn compute_multivariate_summary_stats(
+    forecast: &ForecastOutput,
+) -> Result<MultivariateSummaryStats> {
+    if forecast.forecast.is_empty() {
+        return Err(TimesfmError::Inference(
+            "Forecast series is empty; cannot compute multivariate summary statistics".to_string(),
+        ));
+    }
+
+    let num_variates = forecast.forecast.len();
+    let mut variate_stats = Vec::with_capacity(num_variates);
+    let mut sum_drift = 0.0f32;
+    let mut max_drift_abs = -1.0f32;
+    let mut max_drift_variate = 0usize;
+    let mut max_spread_val = -1.0f32;
+    let mut max_volatility_variate = 0usize;
+    let mut global_min_bound = f32::INFINITY;
+    let mut global_max_bound = f32::NEG_INFINITY;
+
+    for v in 0..num_variates {
+        let st = compute_summary_stats_for_variate(forecast, v)?;
+        sum_drift += st.net_drift_percent;
+        if st.net_drift_percent.abs() > max_drift_abs {
+            max_drift_abs = st.net_drift_percent.abs();
+            max_drift_variate = v;
+        }
+        if st.max_spread > max_spread_val {
+            max_spread_val = st.max_spread;
+            max_volatility_variate = v;
+        }
+        if st.min_bound < global_min_bound {
+            global_min_bound = st.min_bound;
+        }
+        if st.max_bound > global_max_bound {
+            global_max_bound = st.max_bound;
+        }
+        variate_stats.push(st);
+    }
+
+    Ok(MultivariateSummaryStats {
+        num_variates,
+        variate_stats,
+        mean_drift_percent: sum_drift / (num_variates as f32),
+        max_drift_variate,
+        max_volatility_variate,
+        global_min_bound,
+        global_max_bound,
     })
 }
 
@@ -297,13 +373,23 @@ fn synthesize_narrative_from_stats(
     }
 }
 
-/// Generates a narrative explanation for a forecast using the provided `BackendEngine`.
+/// Generates a narrative explanation for variate 0 of a forecast using the provided `BackendEngine`.
 pub fn generate_forecast_narrative_with_engine(
     forecast: &ForecastOutput,
     prompt_instruction: Option<&str>,
     engine: &dyn BackendEngine,
 ) -> Result<ForecastNarrative> {
-    let stats = compute_summary_stats(forecast)?;
+    generate_variate_narrative_with_engine(forecast, 0, prompt_instruction, engine)
+}
+
+/// Generates a narrative explanation for a specific `variate_idx` using the provided `BackendEngine`.
+pub fn generate_variate_narrative_with_engine(
+    forecast: &ForecastOutput,
+    variate_idx: usize,
+    prompt_instruction: Option<&str>,
+    engine: &dyn BackendEngine,
+) -> Result<ForecastNarrative> {
+    let stats = compute_summary_stats_for_variate(forecast, variate_idx)?;
     let prompt = build_narrative_prompt(&stats, prompt_instruction);
 
     let req = GenerateRequest {
@@ -331,6 +417,29 @@ pub fn generate_forecast_narrative_with_engine(
     }
 }
 
+/// Generates per-variate narratives across all variates in a multivariate `ForecastOutput` using the provided `BackendEngine`.
+pub fn generate_multivariate_forecast_narrative_with_engine(
+    forecast: &ForecastOutput,
+    prompt_instruction: Option<&str>,
+    engine: &dyn BackendEngine,
+) -> Result<Vec<ForecastNarrative>> {
+    if forecast.forecast.is_empty() {
+        return Err(TimesfmError::Inference(
+            "Forecast series is empty; cannot generate multivariate narratives".to_string(),
+        ));
+    }
+    let mut narratives = Vec::with_capacity(forecast.forecast.len());
+    for v in 0..forecast.forecast.len() {
+        narratives.push(generate_variate_narrative_with_engine(
+            forecast,
+            v,
+            prompt_instruction,
+            engine,
+        )?);
+    }
+    Ok(narratives)
+}
+
 /// Generates a narrative explanation for a forecast using `apfel::default_engine()`.
 pub fn generate_forecast_narrative(
     forecast: &ForecastOutput,
@@ -338,6 +447,15 @@ pub fn generate_forecast_narrative(
 ) -> Result<ForecastNarrative> {
     let engine = default_engine();
     generate_forecast_narrative_with_engine(forecast, prompt_instruction, engine.as_ref())
+}
+
+/// Generates per-variate narratives across all variates in a multivariate `ForecastOutput` using `apfel::default_engine()`.
+pub fn generate_multivariate_forecast_narrative(
+    forecast: &ForecastOutput,
+    prompt_instruction: Option<&str>,
+) -> Result<Vec<ForecastNarrative>> {
+    let engine = default_engine();
+    generate_multivariate_forecast_narrative_with_engine(forecast, prompt_instruction, engine.as_ref())
 }
 
 #[cfg(feature = "narrative")]

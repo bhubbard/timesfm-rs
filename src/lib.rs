@@ -50,6 +50,9 @@ pub mod narrative;
 
 #[cfg(feature = "narrative")]
 pub use narrative::{
-    build_narrative_prompt, compute_summary_stats, generate_forecast_narrative,
-    generate_forecast_narrative_with_engine, ForecastNarrative, ForecastSummaryStats,
+    build_narrative_prompt, compute_multivariate_summary_stats, compute_summary_stats,
+    compute_summary_stats_for_variate, generate_forecast_narrative,
+    generate_forecast_narrative_with_engine, generate_multivariate_forecast_narrative,
+    generate_multivariate_forecast_narrative_with_engine, generate_variate_narrative_with_engine,
+    ForecastNarrative, ForecastSummaryStats, MultivariateSummaryStats,
 };

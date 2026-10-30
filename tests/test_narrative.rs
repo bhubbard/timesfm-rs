@@ -292,3 +292,45 @@ fn test_forecaster_explain_with_apfel() -> timesfm::Result<()> {
 
     Ok(())
 }
+
+#[test]
+fn test_multivariate_summary_stats_and_narratives() -> timesfm::Result<()> {
+    use timesfm::narrative::{
+        compute_multivariate_summary_stats, generate_multivariate_forecast_narrative,
+    };
+
+    let mv_forecast = ForecastOutput {
+        ts_id: Some("multivariate-narratives".to_string()),
+        forecast: vec![
+            vec![100.0, 105.0, 110.0], // +10% drift
+            vec![200.0, 160.0, 120.0], // -40% drift
+        ],
+        quantiles: Some(vec![
+            vec![
+                vec![95.0, 96.0, 97.0, 98.0, 100.0, 102.0, 103.0, 104.0, 105.0],
+                vec![98.0, 100.0, 102.0, 103.0, 105.0, 107.0, 108.0, 110.0, 112.0],
+                vec![100.0, 102.0, 104.0, 106.0, 110.0, 114.0, 116.0, 118.0, 120.0], // spread = 20
+            ],
+            vec![
+                vec![180.0, 185.0, 190.0, 195.0, 200.0, 205.0, 210.0, 215.0, 220.0],
+                vec![130.0, 140.0, 145.0, 150.0, 160.0, 170.0, 175.0, 180.0, 190.0], // spread = 60
+                vec![80.0, 90.0, 100.0, 110.0, 120.0, 130.0, 140.0, 150.0, 160.0],   // spread = 80
+            ],
+        ]),
+    };
+
+    let mv_stats = compute_multivariate_summary_stats(&mv_forecast)?;
+    assert_eq!(mv_stats.num_variates, 2);
+    assert_eq!(mv_stats.max_drift_variate, 1);
+    assert_eq!(mv_stats.max_volatility_variate, 1);
+    assert!((mv_stats.mean_drift_percent - (-15.0)).abs() < 1e-3);
+    assert!((mv_stats.global_min_bound - 80.0).abs() < 1e-3);
+    assert!((mv_stats.global_max_bound - 220.0).abs() < 1e-3);
+
+    let narratives = generate_multivariate_forecast_narrative(&mv_forecast, None)?;
+    assert_eq!(narratives.len(), 2);
+    assert!(narratives[0].trend_description.contains("Upward trend"));
+    assert!(narratives[1].trend_description.contains("Downward trend"));
+
+    Ok(())
+}

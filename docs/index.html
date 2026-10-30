@@ -142,6 +142,14 @@
           <h3 class="font-bold text-white text-base mb-2">🛰️ Edge & Embedded Ready</h3>
           <p class="text-slate-400 text-sm leading-relaxed">Consumes less than 600 MB RAM for 500 parallel series, making it ideal for edge gateways and local financial monitoring.</p>
         </div>
+        <div class="glass-card p-6 rounded-xl">
+          <h3 class="font-bold text-white text-base mb-2">🎯 Conformal Calibration &amp; Anomaly Detection</h3>
+          <p class="text-slate-400 text-sm leading-relaxed">Built-in Conformalized Quantile Regression (CQR) for finite-sample coverage guarantees, zero-shot inter-decile anomaly detection, and classical seasonal decomposition.</p>
+        </div>
+        <div class="glass-card p-6 rounded-xl">
+          <h3 class="font-bold text-white text-base mb-2">🤝 Statistical Baselines &amp; Ensembling</h3>
+          <p class="text-slate-400 text-sm leading-relaxed">Includes Naive, SeasonalNaive, Drift, and Holt-Winters forecasters plus an inverse-MAE backtest-weighted <code>EnsembleForecaster</code> with Vincentized quantiles.</p>
+        </div>
     </div>
 
     <!-- Benchmarks Section -->
@@ -214,9 +222,9 @@
         <div class="flex items-center justify-between pb-3 border-b border-white/10 mb-4">
           <div>
             <h3 class="text-sm font-bold text-white uppercase tracking-wider">📐 Numerical Accuracy &amp; Invariant Verification</h3>
-            <p class="text-[11px] text-slate-400 mt-0.5">Empirically validated via <code>tests/test_accuracy.rs</code> against signal decomposition standards.</p>
+            <p class="text-[11px] text-slate-400 mt-0.5">Empirically validated via <code>tests/test_accuracy.rs</code> and <code>tests/test_metrics_and_v25.rs</code> across 10 test suites.</p>
           </div>
-          <span class="text-xs font-bold text-emerald-400 bg-emerald-500/10 px-2.5 py-1 rounded border border-emerald-500/20">27 / 27 Tests Passing</span>
+          <span class="text-xs font-bold text-emerald-400 bg-emerald-500/10 px-2.5 py-1 rounded border border-emerald-500/20">65 / 65 Tests Passing</span>
         </div>
         <div class="grid grid-cols-2 sm:grid-cols-4 gap-4 text-center">
           <div class="bg-white/[0.03] p-3 rounded-lg border border-white/5">

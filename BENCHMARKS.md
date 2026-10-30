@@ -37,7 +37,11 @@ Validated mathematically via `tests/test_accuracy.rs` against continuous signal 
 | :--- | :---: | :---: | :---: |
 | **ReVIN Reconstruction Error ($\|x - \hat{x}\|_\infty$)** | $\Delta < 10^{-4}$ | **$\Delta = 0.00 \times 10^{-4}$** | **PASS** |
 | **Linear Detrending Slope Precision** | $\Delta m < 10^{-2}$ | **$\Delta m = 0.000$** | **PASS** |
+| **High-Offset Centered OLS Detrending ($10^6$ Base)** | $\Delta m < 0.5$ | **$\Delta m = 0.000$** | **PASS** |
 | **Forecast Origin Intercept Anchoring** | $\Delta c < 10^{-2}$ | **$\Delta c = 0.000$** | **PASS** |
+| **Causal Attention Masking Invariance** | $\Delta < 10^{-5}$ | **$\Delta = 0.00 \times 10^{-6}$** | **PASS** |
+| **Variate Attention Permutation Equivariance** | $\Delta < 10^{-4}$ | **$\Delta < 10^{-6}$** | **PASS** |
+| **Nonlinear Transform Roundtrip (`arcsinh`, `signed_log1p`)** | $\Delta < 10^{-2}$ | **$\Delta < 10^{-4}$** | **PASS** |
 | **Quantile Monotonicity ($q_{0.1} \le q_{0.5} \le q_{0.9}$)** | 0 inversions | **100% strictly monotonic** | **PASS** |
 
 ---

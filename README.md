@@ -175,6 +175,33 @@ let anomalies = detect_quantile_anomalies(&actual, &calibrated_output, 0, 2.5)?;
 let bt_report = backtest_univariate(&forecaster, &historical_series, &BacktestConfig::default())?;
 ```
 
+### 4. Statistical Baselines & Multi-Model Ensembling
+
+```rust
+use std::sync::Arc;
+use timesfm::{
+    BacktestConfig, DriftForecaster, EnsembleForecaster, HoltLinearForecaster, NaiveForecaster,
+    SeasonalNaiveForecaster,
+};
+use timesfm::mcp::Forecaster;
+
+let models: Vec<Arc<dyn Forecaster>> = vec![
+    Arc::new(NaiveForecaster::default()),
+    Arc::new(SeasonalNaiveForecaster::new(Some(12))),
+    Arc::new(DriftForecaster::default()),
+    Arc::new(HoltLinearForecaster::new(0.4, 0.2, 0.98)),
+];
+
+// Automatically fit inverse-MAE ensemble weights via walk-forward backtesting
+let bt_cfg = BacktestConfig {
+    initial_context_len: 36,
+    horizon: 12,
+    step_size: 12,
+};
+let ensemble = EnsembleForecaster::fit_inverse_mae_weights(models, &calibration_series, &bt_cfg)?;
+let ensemble_forecast = ensemble.forecast_univariate(&context, 12, true)?;
+```
+
 ---
 
 ## Command Line Interface (CLI)

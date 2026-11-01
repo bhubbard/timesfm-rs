@@ -87,6 +87,7 @@ fn build_compact_v25_forecaster(device: &Device) -> timesfm::Result<TimesFM2p5Fo
         head_dim: 16,
         quantiles: vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
         quantile_horizon_length: 128,
+        use_continuous_quantile_head: false,
         rms_norm_eps: 1e-6,
     };
 

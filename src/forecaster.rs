@@ -428,13 +428,15 @@ impl TimesFM2p5Forecaster {
         let cleaned_contexts: Vec<Vec<f32>> =
             contexts.iter().map(|s| linear_interpolation(s)).collect();
 
-        let is_non_negative = if options.make_positive {
-            contexts
-                .iter()
-                .all(|c| c.iter().all(|&v| v >= 0.0 || !v.is_finite()))
-        } else {
-            false
-        };
+        // Google strips leading NaNs before padding; retain their positions as masked padding.
+        let mask: Vec<f32> = contexts
+            .iter()
+            .flat_map(|c| {
+                let leading = c.iter().take_while(|v| v.is_nan()).count();
+                (0..context_len).map(move |i| if i < leading { 1.0 } else { 0.0 })
+            })
+            .collect();
+        let mask = Tensor::from_vec(mask, (1, num_variates, context_len), &self.device)?;
 
         let mut z_stats = Vec::with_capacity(num_variates);
         let mut normalized_contexts = Vec::with_capacity(num_variates);
@@ -463,11 +465,11 @@ impl TimesFM2p5Forecaster {
             &self.device,
         )?;
 
-        let mut logits = self.model.decode(&target_tensor, horizon, None)?;
+        let mut logits = self.model.decode(&target_tensor, horizon, Some(&mask))?;
 
         if options.use_symmetric_averaging {
             let neg_target = target_tensor.neg()?;
-            let neg_logits = self.model.decode(&neg_target, horizon, None)?;
+            let neg_logits = self.model.decode(&neg_target, horizon, Some(&mask))?;
             let neg_logits_flipped = neg_logits.neg()?;
             let num_q = neg_logits_flipped.dim(candle_core::D::Minus1)?;
             let neg_logits_aligned = if num_q > 1 {
@@ -494,6 +496,8 @@ impl TimesFM2p5Forecaster {
         };
 
         for (v, &(mean, std)) in z_stats.iter().enumerate().take(num_variates) {
+            let is_non_negative = options.make_positive
+                && contexts[v].iter().all(|&v| v >= 0.0 || !v.is_finite());
             let mut v_forecast = Vec::with_capacity(horizon);
             let mut v_quantiles = if options.return_quantiles {
                 Some(Vec::with_capacity(horizon))
@@ -516,7 +520,13 @@ impl TimesFM2p5Forecaster {
                 }
 
                 if options.sort_quantiles {
-                    q_row.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                    // Repair crossings without moving the point forecast at the median.
+                    for q in (0..median_q_idx).rev() {
+                        q_row[q] = q_row[q].min(q_row[q + 1]);
+                    }
+                    for q in (median_q_idx + 1)..num_quantiles {
+                        q_row[q] = q_row[q].max(q_row[q - 1]);
+                    }
                 }
 
                 v_forecast.push(q_row[median_q_idx]);

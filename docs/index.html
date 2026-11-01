@@ -78,6 +78,133 @@
       border: 1px solid rgba(255, 255, 255, 0.08);
     }
   </style>
+
+  <style id="bh-minimalist-hero-css">
+    /* Minimalist Design System & Hero Standardization */
+    .glow, .glow-1, .glow-2, .glow-bg, .ambient-glow {
+      display: none !important;
+    }
+    body {
+      height: auto !important;
+      min-height: 100vh !important;
+      overflow-y: auto !important;
+    }
+    .main-grid, .main-layout {
+      min-height: 680px !important;
+    }
+    header.bh-minimal-topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0.85rem 2rem;
+      border-bottom: 1px solid var(--color-border, var(--border, #262626));
+      background: var(--color-bg-primary, var(--bg, #0a0a0a));
+      font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.78rem;
+    }
+    header.bh-minimal-topbar a {
+      color: var(--color-text-secondary, #a1a1aa);
+      text-decoration: none;
+    }
+    header.bh-minimal-topbar a:hover {
+      color: var(--color-text-primary, #fafafa);
+    }
+    section.hero.bh-minimal-hero {
+      display: block !important;
+      grid-template-columns: 1fr !important;
+      padding: 2.75rem 2rem 2.25rem !important;
+      border-bottom: 1px solid var(--color-border, var(--border, var(--border-grid, #262626))) !important;
+      background: transparent !important;
+      text-align: left !important;
+      max-width: 1280px;
+      margin: 0 auto;
+      width: 100%;
+      box-sizing: border-box;
+    }
+    .bh-minimal-hero .bh-hero-inner {
+      max-width: 820px;
+      margin: 0;
+    }
+    .bh-minimal-hero .bh-hero-eyebrow {
+      display: inline-block;
+      font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.72rem;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--color-accent-cyan, var(--accent, #06b6d4));
+      margin-bottom: 0.75rem;
+    }
+    .bh-minimal-hero h1 {
+      font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif !important;
+      font-size: clamp(1.65rem, 3vw, 2.35rem) !important;
+      font-weight: 700 !important;
+      letter-spacing: -0.025em !important;
+      line-height: 1.2 !important;
+      color: var(--color-text-primary, var(--text, var(--text-primary, #fafafa))) !important;
+      margin: 0 0 0.85rem 0 !important;
+      background: none !important;
+      -webkit-text-fill-color: currentColor !important;
+    }
+    .bh-minimal-hero p.hero-lead {
+      font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif !important;
+      font-size: 1.04rem !important;
+      font-weight: 400 !important;
+      line-height: 1.65 !important;
+      color: var(--color-text-secondary, var(--muted, var(--text-secondary, #a1a1aa))) !important;
+      margin: 0 0 1.35rem 0 !important;
+      max-width: 72ch !important;
+    }
+    .bh-minimal-hero .bh-hero-actions {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.75rem;
+    }
+    .bh-minimal-hero .bh-cli-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.75rem;
+      padding: 0.45rem 0.65rem 0.45rem 0.85rem;
+      background: var(--color-bg-surface, var(--surface, #121212));
+      border: 1px solid var(--color-border, var(--border, #262626));
+      font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.8rem;
+      color: var(--color-text-primary, #e4e4e7);
+    }
+    .bh-minimal-hero .bh-cli-pill code {
+      font-family: inherit;
+      color: inherit;
+      background: transparent;
+      padding: 0;
+    }
+    .bh-minimal-hero .bh-copy-btn,
+    .bh-minimal-hero .bh-github-btn {
+      font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.74rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      padding: 0.35rem 0.7rem;
+      border: 1px solid var(--color-border, var(--border, #2e2e32));
+      background: transparent;
+      color: var(--color-text-primary, #fafafa);
+      cursor: pointer;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      transition: border-color 0.15s ease, background 0.15s ease;
+    }
+    .bh-minimal-hero .bh-github-btn {
+      padding: 0.55rem 0.95rem;
+    }
+    .bh-minimal-hero .bh-copy-btn:hover,
+    .bh-minimal-hero .bh-github-btn:hover {
+      border-color: var(--color-accent-cyan, var(--accent, #06b6d4));
+      color: var(--color-accent-cyan, var(--accent, #06b6d4));
+    }
+  </style>
 </head>
 <body class="tech-grid-bg min-h-screen flex flex-col">
 
@@ -101,30 +228,22 @@
   </header>
 
   <!-- Hero Section -->
-  <section class="py-20 px-6 max-w-7xl mx-auto w-full flex-1">
-    <div class="max-w-3xl">
-      <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-white/10 bg-white/5 text-xs font-mono text-slate-300 mb-6">
-        <span class="w-2 h-2 rounded-full" style="background-color: #38bdf8;"></span>
-        <span>Google TimesFM in Pure Rust</span>
-      </div>
-      <h1 class="text-4xl sm:text-5xl lg:text-6xl font-extrabold tracking-tight text-white mb-6 leading-tight">
-        timesfm-rs — Pure Rust Time-Series Foundation Model on Apple Silicon
-      </h1>
-      <p class="text-lg sm:text-xl text-slate-300 mb-8 font-light leading-relaxed">
-        13.4× Faster Zero-Shot Forecasts • 8.3× Lower RAM • Metal Unified Memory Acceleration
-      </p>
-      <div class="flex flex-wrap items-center gap-4">
-        <div class="flex items-center bg-dark-900 border border-white/10 rounded-lg px-4 py-2.5 font-mono text-sm text-slate-200">
-          <span class="text-slate-500 mr-2">$</span>
-          <span>cargo add timesfm-rs</span>
+      <section class="hero bh-minimal-hero" id="overview">
+      <div class="bh-hero-inner">
+        <span class="bh-hero-eyebrow">RUST · TIME-SERIES FORECASTING AI</span>
+        <h1>timesfm-rs — Native Rust Inference Engine for Google Research&#x27;s TimesFM Foundation Model</h1>
+        <p class="hero-lead">timesfm-rs is a pure Rust time-series forecasting engine that runs Google Research&#x27;s patched-decoder TimesFM foundation model 13.4× faster than Python/JAX. It performs zero-shot univariate and multivariate forecasting with quantile uncertainty intervals on CPU and Apple Silicon Metal GPUs.</p>
+        <div class="bh-hero-actions">
+          <div class="bh-cli-pill">
+            <code id="install-command-text">$ cargo add timesfm-rs</code>
+            <button type="button" class="bh-copy-btn" id="copyBtn" data-copy="cargo add timesfm-rs" onclick="navigator.clipboard.writeText('cargo add timesfm-rs');this.textContent='Copied';setTimeout(()=>this.textContent='Copy',1500);">Copy</button>
+          </div>
+          <a href="https://github.com/bhubbard/timesfm-rs" class="bh-github-btn" target="_blank" rel="noopener noreferrer">GitHub ↗</a>
         </div>
-        <a href="#benchmarks" class="px-5 py-2.5 rounded-lg font-mono text-sm font-semibold text-black transition" style="background-color: #38bdf8;">
-          View Benchmarks &darr;
-        </a>
       </div>
-    </div>
-
-    <!-- Feature Cards Grid -->
+    </section>
+  <section class="py-12 px-6 max-w-7xl mx-auto w-full flex-1">
+<!-- Feature Cards Grid -->
     <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mt-16">
               <div class="glass-card p-6 rounded-xl">
           <h3 class="font-bold text-white text-base mb-2">⚡ Zero Python / JAX Overhead</h3>

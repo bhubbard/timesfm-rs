@@ -44,12 +44,6 @@ impl TimesFM2p5TransformerLayer {
         let post_attn_ln = norm(hidden_size, eps, vb.pp("post_attn_ln"))?;
         let head_dim = hidden_size / num_heads;
         let attn = vb.pp("attn");
-        let qkv_proj = linear_no_bias(hidden_size, 3 * hidden_size, attn.pp("qkv_proj"))?;
-        let attn_out = linear_no_bias(hidden_size, hidden_size, attn.pp("out"))?;
-        let query_ln = norm(head_dim, eps, attn.pp("query_ln"))?;
-        let key_ln = norm(head_dim, eps, attn.pp("key_ln"))?;
-        let per_dim_scale = PerDimScale::new(head_dim, attn.pp("per_dim_scale"))?;
-        let rope = RotaryPositionalEmbedding::new(head_dim, 1.0, 10000.0, vb.device())?;
         let pre_ff_ln = norm(hidden_size, eps, vb.pp("pre_ff_ln"))?;
         let post_ff_ln = norm(hidden_size, eps, vb.pp("post_ff_ln"))?;
 
@@ -59,12 +53,12 @@ impl TimesFM2p5TransformerLayer {
         Ok(Self {
             pre_attn_ln,
             post_attn_ln,
-            qkv_proj,
-            attn_out,
-            query_ln,
-            key_ln,
-            per_dim_scale,
-            rope,
+            qkv_proj: linear_no_bias(hidden_size, 3 * hidden_size, attn.pp("qkv_proj"))?,
+            attn_out: linear_no_bias(hidden_size, hidden_size, attn.pp("out"))?,
+            query_ln: norm(head_dim, eps, attn.pp("query_ln"))?,
+            key_ln: norm(head_dim, eps, attn.pp("key_ln"))?,
+            per_dim_scale: PerDimScale::new(head_dim, attn.pp("per_dim_scale"))?,
+            rope: RotaryPositionalEmbedding::new(head_dim, 1.0, 10000.0, vb.device())?,
             num_heads,
             pre_ff_ln,
             post_ff_ln,
@@ -79,22 +73,16 @@ impl TimesFM2p5TransformerLayer {
 
     pub fn forward_with_mask(&self, x: &Tensor, patch_mask: Option<&Tensor>) -> CResult<Tensor> {
         let (b, n, d) = x.dims3()?;
-        let head_dim = d / self.num_heads;
         let h_norm = self.pre_attn_ln.forward(x)?;
         let qkv = self.qkv_proj.forward(&h_norm)?;
-        let project = |offset| {
-            qkv.narrow(2, offset, d)?
-                .contiguous()?
-                .reshape((b, n, self.num_heads, head_dim))
-        };
+        let shape = (b, n, self.num_heads, d / self.num_heads);
+        let project = |offset| qkv.narrow(2, offset, d)?.reshape(shape);
         let index = Tensor::arange(0u32, n as u32, x.device())?.to_dtype(DType::F32)?;
-        let num_masked = match patch_mask {
-            Some(mask) => mask.to_dtype(DType::F32)?.sum(1)?,
-            None => Tensor::zeros(b, DType::F32, x.device())?,
+        let mask = match patch_mask {
+            Some(mask) => mask.to_dtype(DType::F32)?,
+            None => Tensor::zeros((b, n), DType::F32, x.device())?,
         };
-        let positions = index
-            .unsqueeze(0)?
-            .broadcast_sub(&num_masked.unsqueeze(1)?)?;
+        let positions = index.unsqueeze(0)?.broadcast_sub(&mask.sum_keepdim(1)?)?;
         let q = self
             .query_ln
             .forward(&self.rope.forward(&project(0)?, Some(&positions))?)?;
@@ -111,13 +99,9 @@ impl TimesFM2p5TransformerLayer {
         // PerDimScale already includes 1/sqrt(head_dim); attention needs no extra scaling.
         let logits = q.matmul(&k.transpose(2, 3)?.contiguous()?)?;
         let keys = index.reshape((1, 1, 1, n))?;
-        let valid = match patch_mask {
-            Some(mask) => mask.eq(0.0)?,
-            None => Tensor::ones((b, n), DType::U8, x.device())?,
-        };
         let allowed = keys
             .broadcast_le(&index.reshape((1, 1, n, 1))?)?
-            .broadcast_mul(&valid.reshape((b, 1, 1, n))?)?
+            .broadcast_mul(&mask.eq(0.0)?.reshape((b, 1, 1, n))?)?
             .broadcast_as(logits.shape())?;
         let masked = Tensor::full(f32::MIN / 2.0, logits.shape(), x.device())?;
         let weights = candle_nn::ops::softmax_last_dim(&allowed.where_cond(&logits, &masked)?)?;
@@ -321,7 +305,7 @@ impl TimesFM2p5Model {
         }
 
         let bv = batch_size * num_variates;
-        let mut values = target_ctx.reshape((batch_size, num_variates, context_len / p, p))?;
+        let mut values = target_ctx.reshape((bv, 1, context_len / p, p))?;
         let mut masks = mask_ctx.reshape(values.shape())?;
         let mut quantile_spread = None;
 
@@ -335,8 +319,8 @@ impl TimesFM2p5Model {
             let normed = revin(&values, &mu, &sigma, false)?;
             let n = values.dim(2)?;
             let hidden = self.embed(&normed.reshape((bv, n, p))?, &masks.reshape((bv, n, p))?)?;
-            let mu = mu.i((.., .., n - 1))?.reshape((bv,))?;
-            let sigma = sigma.i((.., .., n - 1))?.reshape((bv,))?;
+            let mu = mu.i((.., 0, n - 1))?;
+            let sigma = sigma.i((.., 0, n - 1))?;
             let point =
                 self.output_projection_point
                     .forward(&hidden)?
@@ -350,12 +334,7 @@ impl TimesFM2p5Model {
                 quantile_spread = Some(revin(&spread, &mu, &sigma, true)?.narrow(2, 1, num_q)?);
             }
             if step + 1 < num_steps {
-                let next = point.i((.., .., median_q_idx))?.reshape((
-                    batch_size,
-                    num_variates,
-                    h_len / p,
-                    p,
-                ))?;
+                let next = point.i((.., .., median_q_idx))?.reshape((bv, 1, h_len / p, p))?;
                 masks = Tensor::cat(&[&masks, &Tensor::zeros_like(&next)?], 2)?;
                 values = Tensor::cat(&[&values, &next], 2)?;
             }

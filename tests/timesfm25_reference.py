@@ -57,5 +57,5 @@ for name, contexts, horizon, continuous, flags in cases:
     ))
     point, quantiles = model.forecast(horizon, [np.array(c, dtype=np.float32) for c in contexts])
     results.append(dict(name=name, contexts=contexts, horizon=horizon, continuous=continuous,
-                        flags=flags, forecast=point.tolist(), quantiles=quantiles[..., 1:].tolist()))
+                        flags=flags, expected=np.concatenate((point.ravel(), quantiles[..., 1:].ravel())).tolist()))
 json.dump(results, sys.stdout, allow_nan=False)

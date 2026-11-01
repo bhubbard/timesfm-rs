@@ -113,8 +113,7 @@ async fn test_timesfm25_checkpoint_parity() -> anyhow::Result<()> {
         horizon: usize,
         continuous: bool,
         flags: [bool; 4],
-        forecast: Vec<Vec<f32>>,
-        quantiles: Vec<Vec<Vec<f32>>>,
+        expected: Vec<f32>,
     }
     let checkpoint = std::env::var("TIMESFM_CHECKPOINT")?;
     let reference = std::process::Command::new(
@@ -158,29 +157,16 @@ async fn test_timesfm25_checkpoint_parity() -> anyhow::Result<()> {
             .flatten()
             .chain(actual.quantiles.unwrap().into_iter().flatten().flatten())
             .collect();
-        let expected: Vec<f32> = case
-            .forecast
-            .into_iter()
-            .flatten()
-            .chain(case.quantiles.into_iter().flatten().flatten())
-            .collect();
-        assert_eq!(actual.len(), expected.len(), "{}", case.name);
-        let mut max_error = 0.0f32;
-        for (i, (a, e)) in actual.iter().zip(&expected).enumerate() {
-            let error = (a - e).abs();
-            max_error = max_error.max(error);
+        assert_eq!(actual.len(), case.expected.len(), "{}", case.name);
+        for (i, (a, e)) in actual.iter().zip(&case.expected).enumerate() {
             // Allow float32 kernel roundoff between PyTorch and Candle.
             assert!(
-                error <= 1e-4 + 1e-6 * e.abs(),
+                (a - e).abs() <= 1e-4 + 1e-6 * e.abs(),
                 "{}[{i}]: Rust {a}, Python {e}",
                 case.name
             );
         }
-        println!(
-            "{}: {} values, max absolute error {max_error:.3e}",
-            case.name,
-            actual.len()
-        );
+        println!("{}: {} values", case.name, actual.len());
     }
     Ok(())
 }

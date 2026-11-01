@@ -428,10 +428,6 @@ impl TimesFM2p5Forecaster {
         let cleaned_contexts: Vec<Vec<f32>> =
             contexts.iter().map(|s| linear_interpolation(s)).collect();
 
-        let is_non_negative: Vec<bool> = contexts
-            .iter()
-            .map(|c| options.make_positive && c.iter().all(|&v| v >= 0.0 || !v.is_finite()))
-            .collect();
         // Google strips leading NaNs before padding; retain their positions as masked padding.
         let mask: Vec<f32> = contexts
             .iter()
@@ -500,6 +496,8 @@ impl TimesFM2p5Forecaster {
         };
 
         for (v, &(mean, std)) in z_stats.iter().enumerate().take(num_variates) {
+            let is_non_negative = options.make_positive
+                && contexts[v].iter().all(|&v| v >= 0.0 || !v.is_finite());
             let mut v_forecast = Vec::with_capacity(horizon);
             let mut v_quantiles = if options.return_quantiles {
                 Some(Vec::with_capacity(horizon))
@@ -515,7 +513,7 @@ impl TimesFM2p5Forecaster {
                     if options.use_znorm {
                         val = val * std + mean;
                     }
-                    if is_non_negative[v] && val < 0.0 {
+                    if is_non_negative && val < 0.0 {
                         val = 0.0;
                     }
                     q_row.push(val);

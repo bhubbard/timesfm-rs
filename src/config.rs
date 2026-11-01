@@ -261,6 +261,9 @@ pub struct TimesFM2p5Config {
     pub quantiles: Vec<f64>,
     #[serde(default = "default_quantile_horizon")]
     pub quantile_horizon_length: usize,
+    /// Use the continuous quantile head, requiring horizon <= quantile_horizon_length.
+    #[serde(default)]
+    pub use_continuous_quantile_head: bool,
     #[serde(default = "default_eps")]
     pub rms_norm_eps: f64,
 }
@@ -310,6 +313,7 @@ impl Default for TimesFM2p5Config {
             head_dim: 80,
             quantiles: default_quantiles(),
             quantile_horizon_length: 1024,
+            use_continuous_quantile_head: false,
             rms_norm_eps: 1e-6,
         }
     }

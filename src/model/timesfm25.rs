@@ -1,17 +1,31 @@
 use candle_core::{DType, IndexOp, Result as CResult, Tensor};
-use candle_nn::{linear, Linear, Module, VarBuilder};
+use candle_nn::{linear_no_bias, Linear, Module, VarBuilder};
 
 use crate::config::{Activation, NormType, ResidualBlockConfig, TimesFM2p5Config};
-use crate::layers::attention::MultiHeadAttention;
 use crate::layers::dense::ResidualBlock;
-use crate::layers::norm::RMSNorm;
+use crate::layers::norm::{PerDimScale, RMSNorm};
+use crate::layers::rope::RotaryPositionalEmbedding;
 use crate::util::{get_running_stats, revin};
+
+fn norm(dim: usize, eps: f64, vb: VarBuilder) -> CResult<RMSNorm> {
+    Ok(RMSNorm {
+        weight: Some(vb.get(dim, "scale")?),
+        eps,
+        dim,
+    })
+}
 
 #[derive(Debug, Clone)]
 pub struct TimesFM2p5TransformerLayer {
     pub pre_attn_ln: RMSNorm,
     pub post_attn_ln: RMSNorm,
-    pub attn: MultiHeadAttention,
+    qkv_proj: Linear,
+    attn_out: Linear,
+    query_ln: RMSNorm,
+    key_ln: RMSNorm,
+    per_dim_scale: PerDimScale,
+    rope: RotaryPositionalEmbedding,
+    num_heads: usize,
     pub pre_ff_ln: RMSNorm,
     pub post_ff_ln: RMSNorm,
     pub ff0: Linear,
@@ -26,23 +40,18 @@ impl TimesFM2p5TransformerLayer {
         eps: f64,
         vb: VarBuilder,
     ) -> CResult<Self> {
-        let pre_attn_ln = RMSNorm::new(hidden_size, eps, Some(vb.pp("pre_attn_ln")))?;
-        let post_attn_ln = RMSNorm::new(hidden_size, eps, Some(vb.pp("post_attn_ln")))?;
-
-        let attn = MultiHeadAttention::new(
-            num_heads,
-            hidden_size,
-            true, // causal
-            false,
-            NormType::Rms,
-            true,
-            true,
-            false,
-            vb.pp("attn"),
-        )?;
-
-        let pre_ff_ln = RMSNorm::new(hidden_size, eps, Some(vb.pp("pre_ff_ln")))?;
-        let post_ff_ln = RMSNorm::new(hidden_size, eps, Some(vb.pp("post_ff_ln")))?;
+        let pre_attn_ln = norm(hidden_size, eps, vb.pp("pre_attn_ln"))?;
+        let post_attn_ln = norm(hidden_size, eps, vb.pp("post_attn_ln"))?;
+        let head_dim = hidden_size / num_heads;
+        let attn = vb.pp("attn");
+        let qkv_proj = linear_no_bias(hidden_size, 3 * hidden_size, attn.pp("qkv_proj"))?;
+        let attn_out = linear_no_bias(hidden_size, hidden_size, attn.pp("out"))?;
+        let query_ln = norm(head_dim, eps, attn.pp("query_ln"))?;
+        let key_ln = norm(head_dim, eps, attn.pp("key_ln"))?;
+        let per_dim_scale = PerDimScale::new(head_dim, attn.pp("per_dim_scale"))?;
+        let rope = RotaryPositionalEmbedding::new(head_dim, 1.0, 10000.0, vb.device())?;
+        let pre_ff_ln = norm(hidden_size, eps, vb.pp("pre_ff_ln"))?;
+        let post_ff_ln = norm(hidden_size, eps, vb.pp("post_ff_ln"))?;
 
         let ff0 = candle_nn::linear_no_bias(hidden_size, intermediate_size, vb.pp("ff0"))?;
         let ff1 = candle_nn::linear_no_bias(intermediate_size, hidden_size, vb.pp("ff1"))?;
@@ -50,7 +59,13 @@ impl TimesFM2p5TransformerLayer {
         Ok(Self {
             pre_attn_ln,
             post_attn_ln,
-            attn,
+            qkv_proj,
+            attn_out,
+            query_ln,
+            key_ln,
+            per_dim_scale,
+            rope,
+            num_heads,
             pre_ff_ln,
             post_ff_ln,
             ff0,
@@ -63,12 +78,61 @@ impl TimesFM2p5TransformerLayer {
     }
 
     pub fn forward_with_mask(&self, x: &Tensor, patch_mask: Option<&Tensor>) -> CResult<Tensor> {
+        let (b, n, d) = x.dims3()?;
+        let head_dim = d / self.num_heads;
         let h_norm = self.pre_attn_ln.forward(x)?;
-        let attn_out = self.attn.forward(&h_norm, patch_mask, None)?;
+        let qkv = self.qkv_proj.forward(&h_norm)?;
+        let project = |offset| {
+            qkv.narrow(2, offset, d)?
+                .contiguous()?
+                .reshape((b, n, self.num_heads, head_dim))
+        };
+        let index = Tensor::arange(0u32, n as u32, x.device())?.to_dtype(DType::F32)?;
+        let num_masked = match patch_mask {
+            Some(mask) => mask.to_dtype(DType::F32)?.sum(1)?,
+            None => Tensor::zeros(b, DType::F32, x.device())?,
+        };
+        let positions = index
+            .unsqueeze(0)?
+            .broadcast_sub(&num_masked.unsqueeze(1)?)?;
+        let q = self
+            .query_ln
+            .forward(&self.rope.forward(&project(0)?, Some(&positions))?)?;
+        let k = self
+            .key_ln
+            .forward(&self.rope.forward(&project(d)?, Some(&positions))?)?;
+        let q = self
+            .per_dim_scale
+            .forward(&q)?
+            .transpose(1, 2)?
+            .contiguous()?;
+        let k = k.transpose(1, 2)?.contiguous()?;
+        let v = project(2 * d)?.transpose(1, 2)?.contiguous()?;
+        // PerDimScale already includes 1/sqrt(head_dim); attention needs no extra scaling.
+        let logits = q.matmul(&k.transpose(2, 3)?.contiguous()?)?;
+        let keys = index.reshape((1, 1, 1, n))?;
+        let valid = match patch_mask {
+            Some(mask) => mask.eq(0.0)?,
+            None => Tensor::ones((b, n), DType::U8, x.device())?,
+        };
+        let allowed = keys
+            .broadcast_le(&index.reshape((1, 1, n, 1))?)?
+            .broadcast_mul(&valid.reshape((b, 1, 1, n))?)?
+            .broadcast_as(logits.shape())?;
+        let masked = Tensor::full(f32::MIN / 2.0, logits.shape(), x.device())?;
+        let weights = candle_nn::ops::softmax_last_dim(&allowed.where_cond(&logits, &masked)?)?;
+        // Match PyTorch SDPA's zero output for entirely masked query rows.
+        let weights = allowed.where_cond(&weights, &Tensor::zeros_like(&weights)?)?;
+        let attended = weights
+            .matmul(&v)?
+            .transpose(1, 2)?
+            .contiguous()?
+            .reshape((b, n, d))?;
+        let attn_out = self.attn_out.forward(&attended)?;
         let h1 = self.post_attn_ln.forward(&attn_out)?.add(x)?;
 
         let ff_norm = self.pre_ff_ln.forward(&h1)?;
-        let ff0_out = self.ff0.forward(&ff_norm)?.relu()?;
+        let ff0_out = candle_nn::ops::silu(&self.ff0.forward(&ff_norm)?)?;
         let ff1_out = self.ff1.forward(&ff0_out)?;
         self.post_ff_ln.forward(&ff1_out)?.add(&h1)
     }
@@ -79,24 +143,38 @@ pub struct TimesFM2p5Model {
     pub config: TimesFM2p5Config,
     pub tokenizer: ResidualBlock,
     pub layers: Vec<TimesFM2p5TransformerLayer>,
-    pub horizon_head: Linear,
+    pub output_projection_point: ResidualBlock,
+    pub output_projection_quantiles: ResidualBlock,
 }
 
 impl TimesFM2p5Model {
     pub fn new(config: TimesFM2p5Config, vb: VarBuilder) -> CResult<Self> {
-        let res_cfg = ResidualBlockConfig {
+        if config.patch_length == 0
+            || config.horizon_length == 0
+            || !config.horizon_length.is_multiple_of(config.patch_length)
+            || config.num_attention_heads == 0
+            || config.head_dim == 0
+            || config.hidden_size != config.num_attention_heads * config.head_dim
+            || !config.head_dim.is_multiple_of(2)
+            || config.quantiles.is_empty()
+            || config.quantile_horizon_length == 0
+            || config.context_length == 0
+        {
+            candle_core::bail!("Invalid TimesFM 2.5 dimensions");
+        }
+        let mut res_cfg = ResidualBlockConfig {
             hidden_dims: config.hidden_size,
             output_dims: config.hidden_size,
-            use_bias: false,
-            activation: Activation::Relu,
+            use_bias: true,
+            activation: Activation::Swish,
             dropout: 0.0,
             identity_skip: false,
             prenorm: NormType::None,
         };
-        let tokenizer = ResidualBlock::new(config.patch_length, &res_cfg, vb.pp("tokenizer"))?;
+        let tokenizer = ResidualBlock::new(2 * config.patch_length, &res_cfg, vb.pp("tokenizer"))?;
 
         let mut layers = Vec::with_capacity(config.num_hidden_layers);
-        let layers_vb = vb.pp("layers");
+        let layers_vb = vb.pp("stacked_xf");
         for i in 0..config.num_hidden_layers {
             let layer = TimesFM2p5TransformerLayer::new(
                 config.hidden_size,
@@ -108,15 +186,28 @@ impl TimesFM2p5Model {
             layers.push(layer);
         }
 
-        let num_q = config.quantiles.len();
-        let head_out = config.horizon_length * num_q;
-        let horizon_head = linear(config.hidden_size, head_out, vb.pp("horizon_head"))?;
+        // Channel zero is the additional point channel; channels 1.. are configured quantiles.
+        let num_q = config.quantiles.len() + 1;
+        res_cfg.use_bias = false;
+        res_cfg.output_dims = config.horizon_length * num_q;
+        let output_projection_point = ResidualBlock::new(
+            config.hidden_size,
+            &res_cfg,
+            vb.pp("output_projection_point"),
+        )?;
+        res_cfg.output_dims = config.quantile_horizon_length * num_q;
+        let output_projection_quantiles = ResidualBlock::new(
+            config.hidden_size,
+            &res_cfg,
+            vb.pp("output_projection_quantiles"),
+        )?;
 
         Ok(Self {
             config,
             tokenizer,
             layers,
-            horizon_head,
+            output_projection_point,
+            output_projection_quantiles,
         })
     }
 
@@ -129,16 +220,32 @@ impl TimesFM2p5Model {
         x_patches: &Tensor,
         patch_mask: Option<&Tensor>,
     ) -> CResult<Tensor> {
-        // x_patches: (b, n, patch_len)
-        let mut h = self.tokenizer.forward(x_patches)?;
-        for layer in &self.layers {
-            h = layer.forward_with_mask(&h, patch_mask)?;
-        }
-        let (b, n, _) = h.dims3()?;
-        let last_token = h.i((.., n - 1, ..))?;
-        let logits = self.horizon_head.forward(&last_token)?;
+        let masks = match patch_mask {
+            Some(mask) => mask
+                .unsqueeze(2)?
+                .broadcast_as(x_patches.shape())?
+                .to_dtype(DType::F32)?,
+            None => Tensor::zeros_like(x_patches)?,
+        };
+        let last_token = self.embed(x_patches, &masks)?;
+        let b = x_patches.dim(0)?;
         let num_q = self.config.quantiles.len();
-        logits.reshape((b, 1, self.config.horizon_length, num_q))
+        self.output_projection_point
+            .forward(&last_token)?
+            .reshape((b, 1, self.config.horizon_length, num_q + 1))?
+            .narrow(3, 1, num_q)
+    }
+
+    fn embed(&self, values: &Tensor, masks: &Tensor) -> CResult<Tensor> {
+        let clean = masks
+            .gt(0.5)?
+            .where_cond(&Tensor::zeros_like(values)?, values)?;
+        let mut h = self.tokenizer.forward(&Tensor::cat(&[&clean, masks], 2)?)?;
+        let patch_mask = masks.min(2)?;
+        for layer in &self.layers {
+            h = layer.forward_with_mask(&h, Some(&patch_mask))?;
+        }
+        h.i((.., h.dim(1)? - 1, ..))
     }
 
     /// Decodes future horizon predictions for univariate or multivariate series.
@@ -169,6 +276,10 @@ impl TimesFM2p5Model {
         let h_len = self.config.horizon_length;
         let num_q = self.config.quantiles.len();
         let median_q_idx = num_q / 2;
+        if self.config.use_continuous_quantile_head && horizon > self.config.quantile_horizon_length
+        {
+            candle_core::bail!("Continuous quantile head horizon exceeds quantile_horizon_length");
+        }
 
         // Truncate to max context_length if needed
         let mut target_ctx = if context_len > self.config.context_length {
@@ -196,7 +307,8 @@ impl TimesFM2p5Model {
                 }
             }
             None => Tensor::zeros((batch_size, num_variates, context_len), DType::F32, device)?,
-        };
+        }
+        .to_dtype(DType::F32)?;
 
         // Left-pad context to a multiple of patch_length
         let ctx_padding = (p - (context_len % p)) % p;
@@ -208,64 +320,57 @@ impl TimesFM2p5Model {
             context_len += ctx_padding;
         }
 
-        let num_patches = context_len / p;
-        let values_bvnp = target_ctx.reshape((batch_size, num_variates, num_patches, p))?;
-        let masks_bvnp = mask_ctx.reshape((batch_size, num_variates, num_patches, p))?;
-
-        // Compute RevIN stats across context patches and extract final context stats (b, v)
-        let (_running_n, running_mu, running_sigma) = get_running_stats(&values_bvnp, &masks_bvnp)?;
-        let mu_bv = running_mu.i((.., .., num_patches - 1))?;
-        let sigma_bv = running_sigma.i((.., .., num_patches - 1))?;
-
-        // Normalize context patches using final context stats
-        let norm_bvnp = revin(&values_bvnp, &mu_bv, &sigma_bv, false)?;
-        let is_masked = masks_bvnp.gt(0.5)?;
-        let zeros_bvnp = Tensor::zeros_like(&norm_bvnp)?;
-        let clean_norm_bvnp = is_masked.where_cond(&zeros_bvnp, &norm_bvnp)?;
-
-        // Patch-level mask: 1.0 if all points in the patch are masked
-        let patch_mask_bvn = masks_bvnp.min(candle_core::D::Minus1)?.gt(0.5)?.to_dtype(DType::F32)?;
-
         let bv = batch_size * num_variates;
-        let mut cur_patches = clean_norm_bvnp.reshape((bv, num_patches, p))?;
-        let mut cur_patch_mask = patch_mask_bvn.reshape((bv, num_patches))?;
-
-        let mu_flat = mu_bv.reshape((bv, 1))?;
-        let sigma_flat = sigma_bv.reshape((bv, 1))?;
+        let mut values = target_ctx.reshape((batch_size, num_variates, context_len / p, p))?;
+        let mut masks = mask_ctx.reshape(values.shape())?;
+        let mut quantile_spread = None;
 
         // Autoregressive multi-step decoding loop
         let num_steps = horizon.div_ceil(h_len);
         let mut step_preds = Vec::with_capacity(num_steps);
 
         for step in 0..num_steps {
-            // (bv, 1, h_len, num_q)
-            let step_logits_norm = self.forward_with_mask(&cur_patches, Some(&cur_patch_mask))?;
-            let step_logits_norm_3d = step_logits_norm.squeeze(1)?; // (bv, h_len, num_q)
-
-            // Denormalize logits back to original scale
-            let step_logits_denorm = revin(&step_logits_norm_3d, &mu_flat, &sigma_flat, true)?;
-            step_preds.push(step_logits_denorm);
-
-            // If additional autoregressive steps are needed, append normalized median predictions as new patches
-            if step + 1 < num_steps {
-                let median_norm = step_logits_norm_3d.i((.., .., median_q_idx))?; // (bv, h_len)
-                // Pad h_len to multiple of p if needed (typically h_len=128 is a multiple of p=32)
-                let rem = h_len % p;
-                let usable_len = h_len - rem;
-                if usable_len > 0 {
-                    let new_patches_count = usable_len / p;
-                    let next_patches = median_norm
-                        .narrow(1, 0, usable_len)?
-                        .reshape((bv, new_patches_count, p))?;
-                    let next_mask = Tensor::zeros((bv, new_patches_count), DType::F32, device)?;
-                    cur_patches = Tensor::cat(&[&cur_patches, &next_patches], 1)?;
-                    cur_patch_mask = Tensor::cat(&[&cur_patch_mask, &next_mask], 1)?;
-                }
+            // Recomputing causal prefixes matches cached decoding while preserving each patch's statistics.
+            let (_, mu, sigma) = get_running_stats(&values, &masks)?;
+            let normed = revin(&values, &mu, &sigma, false)?;
+            let n = values.dim(2)?;
+            let hidden = self.embed(&normed.reshape((bv, n, p))?, &masks.reshape((bv, n, p))?)?;
+            let mu = mu.i((.., .., n - 1))?.reshape((bv,))?;
+            let sigma = sigma.i((.., .., n - 1))?.reshape((bv,))?;
+            let point =
+                self.output_projection_point
+                    .forward(&hidden)?
+                    .reshape((bv, h_len, num_q + 1))?;
+            let point = revin(&point, &mu, &sigma, true)?.narrow(2, 1, num_q)?;
+            if step == 0 && self.config.use_continuous_quantile_head {
+                let spread = self
+                    .output_projection_quantiles
+                    .forward(&hidden)?
+                    .reshape((bv, self.config.quantile_horizon_length, num_q + 1))?;
+                quantile_spread = Some(revin(&spread, &mu, &sigma, true)?.narrow(2, 1, num_q)?);
             }
+            if step + 1 < num_steps {
+                let next = point.i((.., .., median_q_idx))?.reshape((
+                    batch_size,
+                    num_variates,
+                    h_len / p,
+                    p,
+                ))?;
+                masks = Tensor::cat(&[&masks, &Tensor::zeros_like(&next)?], 2)?;
+                values = Tensor::cat(&[&values, &next], 2)?;
+            }
+            step_preds.push(point);
         }
 
         let full_horizon_flat = Tensor::cat(&step_preds.iter().collect::<Vec<_>>(), 1)?;
-        let trimmed_flat = full_horizon_flat.narrow(1, 0, horizon)?;
+        let mut trimmed_flat = full_horizon_flat.narrow(1, 0, horizon)?;
+        if let Some(spread) = quantile_spread {
+            let spread = spread.narrow(1, 0, horizon)?;
+            let median = trimmed_flat.narrow(2, median_q_idx, 1)?;
+            trimmed_flat = spread
+                .broadcast_sub(&spread.narrow(2, median_q_idx, 1)?)?
+                .broadcast_add(&median)?;
+        }
         trimmed_flat.reshape((batch_size, num_variates, horizon, num_q))
     }
 }

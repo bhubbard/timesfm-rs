@@ -26,6 +26,7 @@ fn create_v25_forecaster() -> timesfm::Result<TimesFM2p5Forecaster> {
         head_dim: 8,
         quantiles: vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
         quantile_horizon_length: 32,
+        use_continuous_quantile_head: true,
         rms_norm_eps: 1e-6,
     };
 
@@ -99,6 +100,88 @@ fn test_timesfm25_forecaster_univariate_and_multivariate() -> timesfm::Result<()
     let resp: serde_json::Value = serde_json::from_str(&resp_str).unwrap();
     assert_eq!(resp["result"]["isError"], false);
 
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires TIMESFM_CHECKPOINT and Google's timesfm[torch]; see timesfm25_reference.py"]
+async fn test_timesfm25_checkpoint_parity() -> anyhow::Result<()> {
+    #[derive(serde::Deserialize)]
+    struct Case {
+        name: String,
+        contexts: Vec<Vec<Option<f32>>>,
+        horizon: usize,
+        continuous: bool,
+        flags: [bool; 4],
+        forecast: Vec<Vec<f32>>,
+        quantiles: Vec<Vec<Vec<f32>>>,
+    }
+    let checkpoint = std::env::var("TIMESFM_CHECKPOINT")?;
+    let reference = std::process::Command::new(
+        std::env::var("TIMESFM_PYTHON").unwrap_or_else(|_| "python3".into()),
+    )
+    .arg(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/timesfm25_reference.py"
+    ))
+    .arg(&checkpoint)
+    .output()?;
+    assert!(
+        reference.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reference.stderr)
+    );
+    let cases: Vec<Case> = serde_json::from_slice(&reference.stdout)?;
+    let mut forecaster = TimesFM2p5Forecaster::from_pretrained(&checkpoint, Device::Cpu).await?;
+    for case in cases {
+        forecaster.model.config.use_continuous_quantile_head = case.continuous;
+        let contexts: Vec<Vec<f32>> = case
+            .contexts
+            .iter()
+            .map(|c| c.iter().map(|v| v.unwrap_or(f32::NAN)).collect())
+            .collect();
+        let [flip, positive, crossing, normalize] = case.flags;
+        let actual = forecaster.predict_multivariate(
+            &contexts.iter().map(Vec::as_slice).collect::<Vec<_>>(),
+            case.horizon,
+            &ForecastOptions {
+                return_quantiles: true,
+                use_symmetric_averaging: flip,
+                make_positive: positive,
+                sort_quantiles: crossing,
+                use_znorm: normalize,
+            },
+        )?;
+        let actual: Vec<f32> = actual
+            .forecast
+            .into_iter()
+            .flatten()
+            .chain(actual.quantiles.unwrap().into_iter().flatten().flatten())
+            .collect();
+        let expected: Vec<f32> = case
+            .forecast
+            .into_iter()
+            .flatten()
+            .chain(case.quantiles.into_iter().flatten().flatten())
+            .collect();
+        assert_eq!(actual.len(), expected.len(), "{}", case.name);
+        let mut max_error = 0.0f32;
+        for (i, (a, e)) in actual.iter().zip(&expected).enumerate() {
+            let error = (a - e).abs();
+            max_error = max_error.max(error);
+            // Allow float32 kernel roundoff between PyTorch and Candle.
+            assert!(
+                error <= 1e-4 + 1e-6 * e.abs(),
+                "{}[{i}]: Rust {a}, Python {e}",
+                case.name
+            );
+        }
+        println!(
+            "{}: {} values, max absolute error {max_error:.3e}",
+            case.name,
+            actual.len()
+        );
+    }
     Ok(())
 }
 
